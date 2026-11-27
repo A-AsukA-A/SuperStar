@@ -21,7 +21,7 @@ import psutil
 
 from api.base import _build_isolated_session, fetch_courses_with_cookies
 from api.cookies import parse_cookie_string, save_cookies_dict, use_cookies
-from api.decode import decode_course_point
+from api.decode import decode_course_catalog
 from web.api_store import api_store
 from web.session_store import session_store
 from web.system_monitor import check_safety_guard
@@ -649,7 +649,7 @@ class InstanceManager:
         if need_fetch and course_ids:
             cookies = use_cookies(os.path.join(inst_dir, "cookies.txt"))
             if not cookies:
-                warning = "当前任务未找到有效 Cookie，暂无法自动生成课程直达链接，可先打开学习通首页或通过卡片「登录」更新扫码。"
+                warning = "当前任务未找到有效 Cookie，请先通过卡片「登录」重新扫码后再查看章节与测验。"
             else:
                 try:
                     fetched = fetch_courses_with_cookies(cookies)
@@ -769,21 +769,28 @@ class InstanceManager:
         if "passport2.chaoxing.com" in final_url or "<title>用户登录" in resp.text:
             raise ValueError("该任务的 Cookie 已过期，请先点击卡片「登录」重新扫码")
 
-        cp = decode_course_point(resp.text)
-        points = cp.get("points") or []
-        completed = sum(1 for p in points if p.get("has_finished"))
+        catalog = decode_course_catalog(resp.text)
         titles = meta.get("course_titles") or {}
         info = (meta.get("course_links") or {}).get(cid) or {}
+        unfinished_cnt = int(catalog["pending_chapters"]) + int(catalog["locked_chapters"])
         return {
             "course_id": cid,
             "title": str(titles.get(cid) or info.get("title") or f"课程 {cid}"),
             "clazzId": clazz_id,
             "cpi": cpi,
-            "total": len(points),
-            "completed": completed,
-            "unfinished": max(0, len(points) - completed),
-            "has_locked": bool(cp.get("hasLocked")),
-            "points": points,
+            "job_done": catalog["job_done"],
+            "job_total": catalog["job_total"],
+            "job_percent": catalog["job_percent"],
+            "total": catalog["total_chapters"],
+            "completed": catalog["completed_chapters"],
+            "pending": catalog["pending_chapters"],
+            "locked": catalog["locked_chapters"],
+            "no_task": catalog["no_task_chapters"],
+            "unfinished": unfinished_cnt,
+            "pending_jobs_total": catalog["pending_jobs_total"],
+            "has_locked": catalog["has_locked"],
+            "units": catalog["units"],
+            "points": catalog["points"],
         }
 
     def get_chapter_cards(self, instance_id: str, course_id: str, knowledge_id: str) -> dict[str, Any]:

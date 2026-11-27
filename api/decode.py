@@ -108,6 +108,146 @@ def decode_course_point(html_text: str) -> Dict[str, Any]:
     return course_point
 
 
+def decode_course_catalog(html_text: str) -> Dict[str, Any]:
+    """
+    解析学习通 studentcourse 页面的完整官网级完成度与两级章节目录结构。
+    """
+    soup = BeautifulSoup(html_text, "lxml")
+
+    def _clean(text: str) -> str:
+        return re.sub(r"\s+", " ", text or "").strip()
+
+    head_el = soup.select_one(".chapter_head, .fanyaChapter")
+    head_text = _clean(head_el.get_text(" ", strip=True)) if head_el else html_text
+    job_match = re.search(r"已完成任务点\s*[:：]?\s*(\d+)\s*/\s*(\d+)", head_text)
+    if not job_match and head_el:
+        job_match = re.search(r"已完成任务点\s*[:：]?\s*(\d+)\s*/\s*(\d+)", html_text)
+
+    units: List[Dict[str, Any]] = []
+    flat_points: List[Dict[str, Any]] = []
+    completed_chapters = 0
+    pending_chapters = 0
+    locked_chapters = 0
+    no_task_chapters = 0
+    pending_jobs_total = 0
+    has_locked = False
+
+    for unit_idx, chapter_unit in enumerate(soup.find_all("div", class_="chapter_unit"), 1):
+        unit_head = chapter_unit.select_one(".catalog_title, .catalog_name, h2, h3")
+        unit_title = _clean(unit_head.get_text(" ", strip=True)) if unit_head else f"第 {unit_idx} 章"
+
+        items: List[Dict[str, Any]] = []
+        u_completed = 0
+        u_pending = 0
+        u_locked = 0
+        u_pending_jobs = 0
+        u_task_chapters = 0
+
+        for li in chapter_unit.find_all("li"):
+            point = li.find("div", id=re.compile(r"^cur\d{1,20}$"))
+            if not point:
+                continue
+            point_id = point.attrs["id"][3:]
+            title_el = point.select_one("a.clicktitle")
+            point_title = _clean(title_el.get_text(" ", strip=True)) if title_el else ""
+            tip_el = point.select_one("span.bntHoverTips")
+            tip_text = _clean(tip_el.get_text(" ", strip=True)) if tip_el else ""
+            jc_el = point.select_one("input.knowledgeJobCount")
+            jc_val = 0
+            if jc_el is not None:
+                try:
+                    jc_val = max(0, int(jc_el.attrs.get("value") or 0))
+                except (TypeError, ValueError):
+                    jc_val = 0
+
+            if "已完成" in tip_text:
+                status = "completed"
+                has_finished = True
+                need_unlock = False
+                p_jobs = 0
+                completed_chapters += 1
+                u_completed += 1
+                u_task_chapters += 1
+            elif "解锁" in tip_text:
+                status = "locked"
+                has_finished = False
+                need_unlock = True
+                has_locked = True
+                p_jobs = jc_val
+                locked_chapters += 1
+                u_locked += 1
+                u_task_chapters += 1
+                pending_jobs_total += p_jobs
+                u_pending_jobs += p_jobs
+            elif jc_el is not None and jc_val > 0:
+                status = "pending"
+                has_finished = False
+                need_unlock = False
+                p_jobs = jc_val
+                pending_chapters += 1
+                u_pending += 1
+                u_task_chapters += 1
+                pending_jobs_total += p_jobs
+                u_pending_jobs += p_jobs
+            else:
+                status = "none"
+                has_finished = False
+                need_unlock = False
+                p_jobs = 0
+                no_task_chapters += 1
+
+            entry = {
+                "id": point_id,
+                "title": point_title,
+                "status": status,
+                "pending_jobs": p_jobs,
+                "tip": tip_text,
+                "has_finished": has_finished,
+                "need_unlock": need_unlock,
+            }
+            items.append(entry)
+            flat_points.append(entry)
+
+        if items or unit_title:
+            units.append(
+                {
+                    "index": unit_idx,
+                    "title": unit_title,
+                    "total_chapters": len(items),
+                    "task_chapters": u_task_chapters,
+                    "completed_chapters": u_completed,
+                    "pending_chapters": u_pending,
+                    "locked_chapters": u_locked,
+                    "pending_jobs": u_pending_jobs,
+                    "items": items,
+                }
+            )
+
+    if job_match:
+        job_done = int(job_match.group(1))
+        job_total = int(job_match.group(2))
+    else:
+        job_total = completed_chapters + pending_chapters + locked_chapters
+        job_done = completed_chapters
+
+    job_percent = round(min(100.0, max(0.0, (job_done / job_total) * 100.0)), 1) if job_total > 0 else 100.0
+
+    return {
+        "job_done": job_done,
+        "job_total": job_total,
+        "job_percent": job_percent,
+        "total_chapters": len(flat_points),
+        "completed_chapters": completed_chapters,
+        "pending_chapters": pending_chapters,
+        "locked_chapters": locked_chapters,
+        "no_task_chapters": no_task_chapters,
+        "pending_jobs_total": pending_jobs_total,
+        "has_locked": has_locked,
+        "units": units,
+        "points": flat_points,
+    }
+
+
 def _extract_points_from_chapter(chapter_unit) -> List[Dict[str, Any]]:
     """
     从章节单元中提取章节点信息

@@ -396,24 +396,48 @@ code {
   background: var(--bg); border: 1px solid var(--border-light); border-radius: 14px; padding: 12px;
   display: flex; flex-direction: column; gap: 10px;
 }
+.portal-course-tabs {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
+}
+.portal-progress-card {
+  background: var(--surface); border: 1px solid var(--border-light); border-radius: 14px;
+  padding: 12px 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.portal-progress-top {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+}
+.portal-progress-title { font-size: 0.96rem; font-weight: 600; color: var(--text); }
+.portal-progress-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .portal-filter-bar {
   display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .portal-chapter-list {
-  display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; padding-right: 2px;
+  display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto; padding-right: 2px;
+}
+.portal-unit-block {
+  background: var(--surface); border: 1px solid var(--border-light); border-radius: 12px; overflow: hidden;
+}
+.portal-unit-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; background: var(--surface-variant); cursor: pointer; font-size: 0.86rem; font-weight: 600;
+}
+.portal-unit-head:hover { background: #e8eaed; }
+.portal-unit-title { flex: 1; min-width: 0; color: var(--text); word-break: break-word; }
+.portal-unit-body {
+  display: flex; flex-direction: column;
 }
 .portal-chapter-item {
-  background: var(--surface); border: 1px solid var(--border-light); border-radius: 10px; overflow: hidden;
+  border-top: 1px solid var(--border-light); background: var(--surface);
 }
 .portal-chapter-head {
   display: flex; justify-content: space-between; align-items: center; gap: 8px;
-  padding: 8px 11px; cursor: pointer; font-size: 0.84rem;
+  padding: 8px 12px 8px 20px; cursor: pointer; font-size: 0.83rem;
 }
-.portal-chapter-head:hover { background: var(--surface-variant); }
+.portal-chapter-head:hover { background: #f8f9fa; }
 .portal-chapter-title { flex: 1; min-width: 0; color: var(--text); font-weight: 500; word-break: break-word; }
 .portal-chapter-cards {
   border-top: 1px solid var(--border-light); background: var(--surface-variant);
-  padding: 8px 11px; display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 12px 8px 24px; display: flex; flex-direction: column; gap: 6px;
 }
 .portal-card-row {
   display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;

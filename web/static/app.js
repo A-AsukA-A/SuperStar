@@ -89,9 +89,12 @@ function closeModalById(id) {
     }
   } else if (id === "portal-modal") {
     activePortalInstanceId = null;
+    portalCoursesList = [];
     portalChaptersCourseId = null;
+    portalCatalogData = null;
     portalChaptersList = [];
     portalCardsCache = {};
+    portalCollapsedUnits = {};
   }
 }
 
@@ -1027,13 +1030,36 @@ window.openInstanceLogs = async (id, name) => {
 };
 
 // ---------------- Chaoxing Portal & Task Options ----------------
+let portalCoursesList = [];
 let portalChaptersCourseId = null;
+let portalCatalogData = null;
 let portalChaptersList = [];
 let portalChapterFilter = "all";
 let portalCardsCache = {};
+let portalCollapsedUnits = {};
+
+function renderPortalCourseTabs() {
+  const box = $("#portal-course-tabs");
+  if (!portalCoursesList.length) {
+    box.innerHTML = `<div class="empty-hint">该任务暂无关联课程</div>`;
+    return;
+  }
+  box.innerHTML = portalCoursesList
+    .map((c) => {
+      const cid = String(c.id);
+      const isSel = portalChaptersCourseId === cid;
+      const teacherSuffix = c.teacher ? ` · ${c.teacher}` : "";
+      return `
+        <button type="button" class="btn ${isSel ? "btn-primary" : "btn-outlined"} btn-sm portal-course-tab" data-course-id="${escapeHtml(cid)}" data-course-title="${escapeHtml(c.title || cid)}">
+          ${escapeHtml((c.title || cid) + teacherSuffix)}
+        </button>
+      `;
+    })
+    .join("");
+}
 
 function renderPortalModal(data) {
-  $("#portal-home-link").href = data.portal_url || "https://i.chaoxing.com/base";
+  portalCoursesList = data.courses || [];
   $("#portal-redo-finished").checked = Boolean(data.redo_finished);
   $("#portal-no-cache").checked = Boolean(data.no_cache);
 
@@ -1046,32 +1072,7 @@ function renderPortalModal(data) {
     warnEl.classList.add("hidden");
   }
 
-  const courses = data.courses || [];
-  const listBox = $("#portal-course-list");
-  if (!courses.length) {
-    listBox.innerHTML = `<div class="empty-hint">该任务暂无关联课程</div>`;
-  } else {
-    listBox.innerHTML = courses
-      .map((c) => {
-        const subParts = [`ID: ${c.id}`];
-        if (c.teacher) subParts.push(c.teacher);
-        if (!c.direct) subParts.push("未缓存直达参数，可点右侧刷新课程链接");
-        const isSelected = portalChaptersCourseId === String(c.id);
-        return `
-          <div class="portal-course-row">
-            <div class="portal-course-info">
-              <span class="portal-course-title">${escapeHtml(c.title || c.id)}</span>
-              <span class="portal-course-sub">${escapeHtml(subParts.join(" · "))}</span>
-            </div>
-            <div class="btn-group">
-              <button type="button" class="btn ${isSelected ? "btn-primary" : "btn-tonal"} btn-sm" onclick="loadPortalCourseChapters('${escapeHtml(c.id)}', '${escapeHtml(c.title || c.id)}')">免登录查章节与测验</button>
-              <a class="btn btn-outlined btn-sm" href="${escapeHtml(c.url)}" target="_blank" rel="noopener noreferrer">官网直达 ↗</a>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
-  }
+  renderPortalCourseTabs();
 
   const failedWrap = $("#portal-failed-wrap");
   const failedPre = $("#portal-failed-works");
@@ -1084,96 +1085,185 @@ function renderPortalModal(data) {
   }
 }
 
+function renderPortalProgressCard(data) {
+  const card = $("#portal-progress-card");
+  if (!data) {
+    card.classList.add("hidden");
+    return;
+  }
+  const jobDone = Number(data.job_done ?? data.completed ?? 0);
+  const jobTotal = Number(data.job_total ?? data.total ?? 0);
+  const jobPct = Number(data.job_percent ?? (jobTotal > 0 ? (jobDone / jobTotal) * 100 : 100));
+  const pendingCh = Number(data.pending ?? data.unfinished ?? 0);
+  const completedCh = Number(data.completed ?? 0);
+  const lockedCh = Number(data.locked ?? 0);
+  const noTaskCh = Number(data.no_task ?? 0);
+  const pendingJobs = Number(data.pending_jobs_total ?? 0);
+
+  $("#portal-progress-title").textContent = data.title || data.course_id || "课程进度";
+  $("#portal-progress-sub").textContent = `官网已完成任务点：${jobDone} / ${jobTotal}`;
+  $("#portal-progress-pct").textContent = `${jobPct.toFixed(1)}%`;
+  $("#portal-progress-bar").style.width = `${Math.min(100, Math.max(0, jobPct))}%`;
+
+  const chips = [
+    `<span class="chip ${pendingCh > 0 ? "chip-warn" : "chip-ok"}">待完成 ${pendingCh} 章${pendingJobs > 0 ? ` (${pendingJobs} 个任务点)` : ""}</span>`,
+    `<span class="chip chip-ok">已完成 ${completedCh} 章</span>`,
+  ];
+  if (lockedCh > 0) chips.push(`<span class="chip chip-danger">需解锁 ${lockedCh} 章</span>`);
+  if (noTaskCh > 0) chips.push(`<span class="chip chip-neutral">无任务点 ${noTaskCh} 章</span>`);
+  $("#portal-progress-chips").innerHTML = chips.join("");
+  card.classList.remove("hidden");
+}
+
+function getChapterStatus(pt) {
+  if (pt.status) return pt.status;
+  if (pt.has_finished) return "completed";
+  if (pt.need_unlock) return "locked";
+  return "pending";
+}
+
+function renderChapterItemHtml(pt, typeLabelMap) {
+  const kid = String(pt.id);
+  const st = getChapterStatus(pt);
+  let stBadge = "";
+  if (st === "completed") {
+    stBadge = `<span class="chip chip-ok">已完成</span>`;
+  } else if (st === "locked") {
+    stBadge = `<span class="chip chip-danger">需解锁${pt.pending_jobs > 0 ? ` (${pt.pending_jobs})` : ""}</span>`;
+  } else if (st === "pending") {
+    const cnt = pt.pending_jobs || pt.jobCount || 1;
+    stBadge = `<span class="chip chip-warn">${cnt} 个待完成</span>`;
+  } else {
+    stBadge = `<span class="chip chip-neutral">无任务点</span>`;
+  }
+
+  const cardsState = portalCardsCache[kid];
+  let cardsHtml = "";
+  if (cardsState && !cardsState.hidden) {
+    if (cardsState.loading) {
+      cardsHtml = `<div class="portal-chapter-cards"><div class="empty-hint">正在通过任务 Cookie 读取任务点...</div></div>`;
+    } else if (cardsState.error) {
+      cardsHtml = `<div class="portal-chapter-cards"><div class="banner banner-err">${escapeHtml(cardsState.error)}</div></div>`;
+    } else if (cardsState.not_open) {
+      cardsHtml = `<div class="portal-chapter-cards"><div class="hint-inline">该章节尚未开放</div></div>`;
+    } else if (!cardsState.cards || !cardsState.cards.length) {
+      cardsHtml = `<div class="portal-chapter-cards"><div class="hint-inline">本章节暂无任务点（仅图文/空页面）</div></div>`;
+    } else {
+      cardsHtml = `
+        <div class="portal-chapter-cards">
+          ${cardsState.cards
+            .map((card) => {
+              const tLabel = typeLabelMap[card.type] || card.type;
+              const passChip =
+                card.is_passed === true
+                  ? `<span class="chip chip-ok">已通过</span>`
+                  : card.is_passed === false
+                    ? `<span class="chip chip-warn">未通过</span>`
+                    : "";
+              const viewBtn = card.view_url
+                ? `<a class="btn btn-tonal btn-sm" href="${escapeHtml(card.view_url)}" target="_blank" rel="noopener noreferrer">免登录查看测验/成绩 ↗</a>`
+                : "";
+              return `
+                <div class="portal-card-row">
+                  <span class="chip chip-neutral">${escapeHtml(tLabel)}</span>
+                  <span class="portal-card-name">${escapeHtml(card.name)}</span>
+                  ${passChip}
+                  ${viewBtn}
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `;
+    }
+  }
+
+  return `
+    <div class="portal-chapter-item">
+      <div class="portal-chapter-head" data-kid="${escapeHtml(kid)}">
+        <span class="portal-chapter-title">${escapeHtml(pt.title || `章节 ${kid}`)}</span>
+        <div class="btn-group">
+          ${stBadge}
+          <span class="chip chip-neutral">${cardsState && !cardsState.hidden ? "收起" : "查任务点/测验"}</span>
+        </div>
+      </div>
+      ${cardsHtml}
+    </div>
+  `;
+}
+
 function renderPortalChapters() {
   const listEl = $("#portal-chapter-list");
   const search = ($("#portal-chapter-search").value || "").trim().toLowerCase();
-  const filtered = portalChaptersList.filter((pt) => {
-    if (portalChapterFilter === "finished" && !pt.has_finished) return false;
-    if (portalChapterFilter === "unfinished" && pt.has_finished) return false;
-    if (search && !(pt.title || "").toLowerCase().includes(search)) return false;
-    return true;
-  });
+  const hasFilterOrSearch = portalChapterFilter !== "all" || Boolean(search);
 
-  if (!filtered.length) {
-    listEl.innerHTML = `<div class="empty-hint">无匹配章节</div>`;
+  const units =
+    portalCatalogData && Array.isArray(portalCatalogData.units) && portalCatalogData.units.length
+      ? portalCatalogData.units
+      : portalChaptersList.length
+        ? [{ index: 1, title: "全部章节", items: portalChaptersList, pending_jobs: 0, task_chapters: portalChaptersList.length, completed_chapters: 0 }]
+        : [];
+
+  if (!units.length) {
+    listEl.innerHTML = `<div class="empty-hint">未读取到任何章节目录</div>`;
     return;
   }
 
   const typeLabelMap = { video: "视频", workid: "测验", document: "文档", read: "阅读", live: "直播" };
+  const unitHtmlList = [];
 
-  listEl.innerHTML = filtered
-    .map((pt) => {
-      const kid = String(pt.id);
-      const stBadge = pt.has_finished
-        ? `<span class="chip chip-ok">已完成</span>`
-        : pt.need_unlock
-          ? `<span class="chip chip-warn">需解锁</span>`
-          : `<span class="chip chip-info">未完成</span>`;
-      const cardsState = portalCardsCache[kid];
-      let cardsHtml = "";
-      if (cardsState) {
-        if (cardsState.loading) {
-          cardsHtml = `<div class="portal-chapter-cards"><div class="empty-hint">正在通过任务 Cookie 读取任务点...</div></div>`;
-        } else if (cardsState.error) {
-          cardsHtml = `<div class="portal-chapter-cards"><div class="banner banner-err">${escapeHtml(cardsState.error)}</div></div>`;
-        } else if (cardsState.not_open) {
-          cardsHtml = `<div class="portal-chapter-cards"><div class="hint-inline">该章节尚未开放</div></div>`;
-        } else if (!cardsState.cards || !cardsState.cards.length) {
-          cardsHtml = `<div class="portal-chapter-cards"><div class="hint-inline">本章节暂无任务点（仅图文/空页面）</div></div>`;
-        } else {
-          cardsHtml = `
-            <div class="portal-chapter-cards">
-              ${cardsState.cards
-                .map((card) => {
-                  const tLabel = typeLabelMap[card.type] || card.type;
-                  const passChip =
-                    card.is_passed === true
-                      ? `<span class="chip chip-ok">已通过</span>`
-                      : card.is_passed === false
-                        ? `<span class="chip chip-warn">未通过</span>`
-                        : "";
-                  const viewBtn = card.view_url
-                    ? `<a class="btn btn-tonal btn-sm" href="${escapeHtml(card.view_url)}" target="_blank" rel="noopener noreferrer">免登录查看测验/成绩 ↗</a>`
-                    : "";
-                  return `
-                    <div class="portal-card-row">
-                      <span class="chip chip-neutral">${escapeHtml(tLabel)}</span>
-                      <span class="portal-card-name">${escapeHtml(card.name)}</span>
-                      ${passChip}
-                      ${viewBtn}
-                    </div>
-                  `;
-                })
-                .join("")}
-            </div>
-          `;
-        }
+  for (const unit of units) {
+    const uItems = (unit.items || []).filter((pt) => {
+      const st = getChapterStatus(pt);
+      if (portalChapterFilter === "pending" && st !== "pending" && st !== "locked") return false;
+      if (portalChapterFilter === "completed" && st !== "completed") return false;
+      if (portalChapterFilter === "none" && st !== "none") return false;
+      if (search && !(pt.title || "").toLowerCase().includes(search) && !(unit.title || "").toLowerCase().includes(search)) {
+        return false;
       }
+      return true;
+    });
 
-      return `
-        <div class="portal-chapter-item">
-          <div class="portal-chapter-head" onclick="togglePortalChapterCards('${escapeHtml(kid)}')">
-            <span class="portal-chapter-title">${escapeHtml(pt.title)}</span>
-            <div class="btn-group">
-              ${stBadge}
-              <span class="chip chip-neutral">${cardsState && !cardsState.hidden ? "收起" : "查任务点/测验"}</span>
-            </div>
-          </div>
-          ${cardsState && !cardsState.hidden ? cardsHtml : ""}
+    if (!uItems.length && hasFilterOrSearch) continue;
+
+    const uKey = String(unit.index);
+    const isCollapsed = hasFilterOrSearch ? false : Boolean(portalCollapsedUnits[uKey]);
+    const unitBadge =
+      unit.pending_jobs > 0
+        ? `<span class="chip chip-warn">待完成 ${unit.pending_jobs}</span>`
+        : unit.task_chapters > 0
+          ? `<span class="chip chip-ok">已全清 (${unit.completed_chapters}/${unit.task_chapters})</span>`
+          : `<span class="chip chip-neutral">${unit.total_chapters || uItems.length} 节</span>`;
+
+    const bodyHtml = isCollapsed
+      ? ""
+      : `<div class="portal-unit-body">${uItems.map((pt) => renderChapterItemHtml(pt, typeLabelMap)).join("")}</div>`;
+
+    unitHtmlList.push(`
+      <div class="portal-unit-block">
+        <div class="portal-unit-head" data-unit-idx="${escapeHtml(uKey)}">
+          <span class="portal-unit-title">${isCollapsed ? "▸" : "▾"} ${escapeHtml(unit.title || `第 ${uKey} 章`)}</span>
+          <div class="btn-group">${unitBadge}</div>
         </div>
-      `;
-    })
-    .join("");
+        ${bodyHtml}
+      </div>
+    `);
+  }
+
+  listEl.innerHTML = unitHtmlList.length ? unitHtmlList.join("") : `<div class="empty-hint">无匹配章节</div>`;
 }
 
 window.loadPortalCourseChapters = async (courseId, courseTitle) => {
   if (!activePortalInstanceId) return;
   const instId = activePortalInstanceId;
   portalChaptersCourseId = String(courseId);
+  portalCatalogData = null;
   portalChaptersList = [];
   portalCardsCache = {};
+  portalCollapsedUnits = {};
   portalChapterFilter = "all";
   $("#portal-chapter-search").value = "";
+  $("#btn-portal-toggle-units").textContent = "全部折叠";
   document.querySelectorAll(".portal-filter-btn").forEach((b) => {
     const isAll = b.dataset.filter === "all";
     b.classList.toggle("active", isAll);
@@ -1181,10 +1271,9 @@ window.loadPortalCourseChapters = async (courseId, courseTitle) => {
     b.classList.toggle("btn-outlined", !isAll);
   });
 
-  $("#portal-browser-title").textContent = `章节与测验 · ${courseTitle || courseId}`;
-  $("#portal-browser-stats").textContent = "加载中...";
-  $("#portal-browser-box").classList.remove("hidden");
-  $("#portal-chapter-list").innerHTML = `<div class="empty-hint">正在用任务 Cookie 拉取学习通章节进度...</div>`;
+  renderPortalCourseTabs();
+  $("#portal-progress-card").classList.add("hidden");
+  $("#portal-chapter-list").innerHTML = `<div class="empty-hint">正在通过任务 Cookie 拉取「${escapeHtml(courseTitle || courseId)}」的官网章节进度...</div>`;
 
   try {
     const { ok, data } = await apiFetch(
@@ -1192,15 +1281,14 @@ window.loadPortalCourseChapters = async (courseId, courseTitle) => {
     );
     if (activePortalInstanceId !== instId || portalChaptersCourseId !== String(courseId)) return;
     if (!ok || !data.ok) {
-      $("#portal-browser-stats").textContent = "";
       $("#portal-chapter-list").innerHTML = `<div class="banner banner-err">${escapeHtml(data.error || "读取失败")}</div>`;
       return;
     }
+    portalCatalogData = data;
     portalChaptersList = data.points || [];
-    $("#portal-browser-stats").textContent = `共 ${data.total} 章 · 已完成 ${data.completed} · 未完成 ${data.unfinished}`;
+    renderPortalProgressCard(data);
     renderPortalChapters();
   } catch (err) {
-    $("#portal-browser-stats").textContent = "";
     $("#portal-chapter-list").innerHTML = `<div class="banner banner-err">读取失败：${escapeHtml(err.message)}</div>`;
   }
 };
@@ -1242,6 +1330,37 @@ window.togglePortalChapterCards = async (knowledgeId) => {
   }
 };
 
+$("#portal-course-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".portal-course-tab");
+  if (!btn) return;
+  window.loadPortalCourseChapters(btn.dataset.courseId, btn.dataset.courseTitle);
+});
+
+$("#portal-chapter-list").addEventListener("click", (e) => {
+  const unitHead = e.target.closest(".portal-unit-head");
+  if (unitHead) {
+    const idx = unitHead.dataset.unitIdx;
+    portalCollapsedUnits[idx] = !portalCollapsedUnits[idx];
+    renderPortalChapters();
+    return;
+  }
+  const chHead = e.target.closest(".portal-chapter-head");
+  if (chHead && chHead.dataset.kid) {
+    window.togglePortalChapterCards(chHead.dataset.kid);
+  }
+});
+
+$("#btn-portal-toggle-units").addEventListener("click", () => {
+  const units = (portalCatalogData && portalCatalogData.units) || [];
+  if (!units.length) return;
+  const allCollapsed = units.every((u) => Boolean(portalCollapsedUnits[String(u.index)]));
+  for (const u of units) {
+    portalCollapsedUnits[String(u.index)] = !allCollapsed;
+  }
+  $("#btn-portal-toggle-units").textContent = !allCollapsed ? "全部展开" : "全部折叠";
+  renderPortalChapters();
+});
+
 document.querySelectorAll(".portal-filter-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     portalChapterFilter = btn.dataset.filter || "all";
@@ -1258,27 +1377,39 @@ $("#portal-chapter-search").addEventListener("input", renderPortalChapters);
 
 window.openChaoxingPortal = async (id, name, refresh = false) => {
   activePortalInstanceId = id;
+  portalCoursesList = [];
   portalChaptersCourseId = null;
+  portalCatalogData = null;
   portalChaptersList = [];
   portalCardsCache = {};
-  $("#portal-browser-box").classList.add("hidden");
-  $("#portal-modal-title").textContent = `学习通后台 · ${name}`;
+  portalCollapsedUnits = {};
+  $("#portal-modal-title").textContent = `学习通章节与测验 · ${name}`;
   $("#portal-warning").classList.add("hidden");
   $("#portal-failed-wrap").classList.add("hidden");
-  $("#portal-course-list").innerHTML = `<div class="empty-hint">${refresh ? "正在从学习通刷新课程链接..." : "正在读取课程入口..."}</div>`;
+  $("#portal-progress-card").classList.add("hidden");
+  $("#portal-course-tabs").innerHTML = `<div class="empty-hint">${refresh ? "正在刷新课程信息..." : "正在加载课程..."}</div>`;
+  $("#portal-chapter-list").innerHTML = `<div class="empty-hint">正在读取课程列表...</div>`;
   $("#portal-modal").classList.remove("hidden");
 
   const qs = refresh ? "?refresh=1" : "";
   try {
     const { ok, data } = await apiFetch(`/api/instances/${id}/portal${qs}`);
     if (!ok || !data.ok) {
-      $("#portal-course-list").innerHTML = `<div class="banner banner-err">${escapeHtml(data.error || "加载失败")}</div>`;
+      $("#portal-course-tabs").innerHTML = `<div class="banner banner-err">${escapeHtml(data.error || "加载失败")}</div>`;
+      $("#portal-chapter-list").innerHTML = "";
       return;
     }
     if (activePortalInstanceId !== id) return;
     renderPortalModal(data);
+    if (portalCoursesList.length) {
+      const first = portalCoursesList[0];
+      await window.loadPortalCourseChapters(first.id, first.title);
+    } else {
+      $("#portal-chapter-list").innerHTML = `<div class="empty-hint">该任务暂无关联课程</div>`;
+    }
   } catch (err) {
-    $("#portal-course-list").innerHTML = `<div class="banner banner-err">加载失败：${escapeHtml(err.message)}</div>`;
+    $("#portal-course-tabs").innerHTML = `<div class="banner banner-err">加载失败：${escapeHtml(err.message)}</div>`;
+    $("#portal-chapter-list").innerHTML = "";
   }
 };
 

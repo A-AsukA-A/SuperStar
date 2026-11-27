@@ -33,6 +33,7 @@ def create_app() -> Flask:
         template_folder="templates",
         static_folder="static",
     )
+    asset_version = str(int(time.time()))
     system_monitor.ensure_started()
 
     @app.before_request
@@ -56,7 +57,7 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", v=asset_version)
 
     @app.get("/api/health")
     def health():

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SuperStar</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v={{ v }}" />
 </head>
 <body>
   <header class="topbar">
@@ -306,47 +306,52 @@
     </div>
   </div>
 
-  <!-- 学习通后台与测验核查弹窗 -->
+  <!-- 学习通章节与测验核查弹窗（免登录直查） -->
   <div id="portal-modal" class="modal hidden">
     <div class="modal-backdrop" data-close-modal="portal-modal"></div>
     <div class="modal-dialog modal-xl">
       <div class="modal-head">
-        <h3 id="portal-modal-title">学习通后台</h3>
+        <h3 id="portal-modal-title">学习通章节与测验</h3>
         <div class="btn-group">
-          <a id="portal-home-link" class="btn btn-tonal btn-sm" href="https://i.chaoxing.com/base" target="_blank" rel="noopener noreferrer">打开学习通首页 ↗</a>
-          <button type="button" id="btn-portal-refresh" class="btn btn-outlined btn-sm">刷新课程链接</button>
+          <button type="button" id="btn-portal-refresh" class="btn btn-outlined btn-sm">刷新课程数据</button>
           <button class="icon-btn" data-close-modal="portal-modal">&times;</button>
         </div>
       </div>
 
-      <div class="banner banner-ok" style="margin-bottom: 10px;">
-        已直接复用该任务保存的登录 Cookie：点击任意课程的「免登录查章节与测验」，即可无需扫码直接浏览全部章节完成度并新开原版测验/成绩页面。
-      </div>
       <div id="portal-warning" class="banner banner-warn hidden" style="margin-bottom: 10px;"></div>
 
-      <div class="surface-box" style="margin-bottom: 12px;">
-        <div class="box-head">
-          <span>任务课程列表</span>
-        </div>
-        <div id="portal-course-list" class="portal-course-list">
-          <div class="empty-hint">加载中...</div>
-        </div>
+      <div id="portal-course-tabs" class="portal-course-tabs">
+        <div class="empty-hint">加载中...</div>
       </div>
 
-      <div id="portal-browser-box" class="portal-browser-box hidden" style="margin-bottom: 12px;">
-        <div class="box-head">
-          <span id="portal-browser-title">章节与测验列表</span>
-          <span id="portal-browser-stats" class="hint-inline"></span>
+      <div id="portal-progress-card" class="portal-progress-card hidden">
+        <div class="portal-progress-top">
+          <div>
+            <div id="portal-progress-title" class="portal-progress-title">-</div>
+            <div id="portal-progress-sub" class="hint-inline">已完成任务点：-</div>
+          </div>
+          <div id="portal-progress-pct" class="progress-pct">0.0%</div>
         </div>
+        <div class="progress-track">
+          <div id="portal-progress-bar" class="progress-fill" style="width: 0%"></div>
+        </div>
+        <div id="portal-progress-chips" class="portal-progress-chips"></div>
+      </div>
+
+      <div id="portal-browser-box" class="portal-browser-box" style="margin-bottom: 12px;">
         <div class="portal-filter-bar">
           <div class="btn-group">
             <button type="button" class="btn btn-tonal btn-sm portal-filter-btn active" data-filter="all">全部</button>
-            <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="unfinished">未完成</button>
-            <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="finished">已完成</button>
+            <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="pending">待完成</button>
+            <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="completed">已完成</button>
+            <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="none">无任务点</button>
+            <button type="button" id="btn-portal-toggle-units" class="btn btn-text btn-sm">全部折叠</button>
           </div>
           <input type="text" id="portal-chapter-search" class="toolbar-input" placeholder="搜索章节标题..." />
         </div>
-        <div id="portal-chapter-list" class="portal-chapter-list"></div>
+        <div id="portal-chapter-list" class="portal-chapter-list">
+          <div class="empty-hint">请选择课程查看官网同步章节完成度</div>
+        </div>
       </div>
 
       <div class="portal-options-box">
@@ -377,6 +382,6 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v={{ v }}"></script>
 </body>
 </html>
