@@ -479,6 +479,49 @@ def create_app() -> Flask:
         except Exception as exc:
             return Response(f"<h3>加载测验页面失败: {exc}</h3>", status=502, mimetype="text/html; charset=utf-8")
 
+    @app.get("/api/instances/<instance_id>/remedy-queue")
+    def get_instance_remedy_queue(instance_id: str):
+        try:
+            data = instance_manager.get_remedy_queue(instance_id)
+            return jsonify({"ok": True, **data})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/instances/<instance_id>/remedy-queue/start")
+    def start_instance_remedy_queue(instance_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            data = instance_manager.start_remedy_queue(instance_id, payload)
+            return jsonify({"ok": True, **data}), 201
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"启动补救队列失败: {exc}"}), 500
+
+    @app.post("/api/instances/<instance_id>/remedy-queue/stop")
+    def stop_instance_remedy_queue(instance_id: str):
+        try:
+            data = instance_manager.stop_remedy_queue(instance_id)
+            return jsonify({"ok": True, **data})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/instances/<instance_id>/remedy-queue")
+    def clear_instance_remedy_queue(instance_id: str):
+        try:
+            data = instance_manager.clear_remedy_queue(instance_id)
+            return jsonify({"ok": True, **data})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     # ---------------- 按课程划分的自建题库 ----------------
 
     @app.get("/api/bank/courses")

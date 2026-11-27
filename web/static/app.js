@@ -95,6 +95,8 @@ function closeModalById(id) {
     portalChaptersList = [];
     portalCardsCache = {};
     portalCollapsedUnits = {};
+    portalSelectedTargets = {};
+    stopRemedyPolling();
   }
 }
 
@@ -1109,6 +1111,135 @@ let portalChaptersList = [];
 let portalChapterFilter = "all";
 let portalCardsCache = {};
 let portalCollapsedUnits = {};
+let portalSelectedTargets = {};
+let remedyPollTimer = null;
+let currentRemedyQueueData = null;
+
+function stopRemedyPolling() {
+  if (remedyPollTimer) {
+    clearInterval(remedyPollTimer);
+    remedyPollTimer = null;
+  }
+}
+
+function getTargetKey(cid, kid, jobid = "") {
+  return `${cid}::${kid}::${jobid || ""}`;
+}
+
+function updatePortalSelectionUi() {
+  const count = Object.keys(portalSelectedTargets).length;
+  const chip = $("#portal-selected-chip");
+  if (chip) {
+    chip.textContent = `已选 ${count} 项`;
+    chip.className = `chip ${count > 0 ? "chip-info" : "chip-neutral"}`;
+  }
+  const startBtn = $("#btn-remedy-start");
+  if (startBtn) {
+    const isRunning =
+      currentRemedyQueueData &&
+      (currentRemedyQueueData.status === "running" || currentRemedyQueueData.status === "starting");
+    startBtn.textContent = `开始排队答题 (${count})`;
+    startBtn.disabled = count === 0 || isRunning;
+  }
+}
+
+function populateRemedyApiSelect(preferredProfileId) {
+  const select = $("#portal-remedy-api");
+  if (!select) return;
+  if (!cachedApiItems.length) {
+    select.innerHTML = `<option value="">请先在「AI API」页面添加配置</option>`;
+    return;
+  }
+  const targetId = preferredProfileId || (cachedApiItems.find((x) => x.is_default) || cachedApiItems[0]).id;
+  select.innerHTML = cachedApiItems
+    .map((item) => {
+      const label = `${item.name} (${item.model})${item.is_default ? " [默认]" : ""}`;
+      return `<option value="${escapeHtml(item.id)}" ${item.id === targetId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+}
+
+function renderRemedyQueue(data) {
+  currentRemedyQueueData = data || { status: "idle", items: [] };
+  const status = currentRemedyQueueData.status || "idle";
+  const items = currentRemedyQueueData.items || [];
+  const isRunning = status === "running" || status === "starting";
+
+  const sumEl = $("#portal-remedy-summary");
+  if (sumEl) {
+    if (status === "running" || status === "starting") {
+      const curIdx = Math.min((currentRemedyQueueData.current_index || 0) + 1, items.length || 1);
+      sumEl.textContent = `排队答题中 (${curIdx}/${items.length})`;
+      sumEl.className = "chip chip-info";
+    } else if (status === "completed") {
+      sumEl.textContent = `已完成 (提交 ${currentRemedyQueueData.done_count || 0} · 跳过 ${currentRemedyQueueData.skipped_count || 0} · 失败 ${currentRemedyQueueData.failed_count || 0})`;
+      sumEl.className = (currentRemedyQueueData.failed_count || 0) > 0 ? "chip chip-warn" : "chip chip-ok";
+    } else if (status === "stopped") {
+      sumEl.textContent = "已停止";
+      sumEl.className = "chip chip-warn";
+    } else {
+      sumEl.textContent = "未开始";
+      sumEl.className = "chip chip-neutral";
+    }
+  }
+
+  $("#btn-remedy-stop").classList.toggle("hidden", !isRunning);
+  $("#btn-remedy-clear").disabled = isRunning || !items.length;
+  updatePortalSelectionUi();
+
+  const listEl = $("#portal-remedy-list");
+  if (!items.length) {
+    listEl.innerHTML = `<div class="empty-hint">在上方勾选需要补救或重做测验的章节（或展开章节加入指定测验），点击「开始排队答题」由 API 自动顺序完成</div>`;
+    return;
+  }
+
+  const stMap = {
+    pending: ["等待中", "chip-neutral"],
+    running: ["答题中", "chip-info"],
+    done: ["已完成", "chip-ok"],
+    skipped: ["已跳过", "chip-warn"],
+    failed: ["失败", "chip-danger"],
+    stopped: ["已停止", "chip-warn"],
+  };
+  listEl.innerHTML = items
+    .map((it) => {
+      const [label, cls] = stMap[it.status] || [it.status || "未知", "chip-neutral"];
+      const titleText = it.work_name ? `${it.chapter_title} · ${it.work_name}` : it.chapter_title;
+      return `
+        <div class="portal-remedy-row">
+          <div class="portal-remedy-info">
+            <span class="portal-remedy-name">${escapeHtml(titleText)} <small class="hint-inline">(${escapeHtml(it.course_title || it.course_id)})</small></span>
+            <span class="portal-remedy-msg">${escapeHtml(it.message || "")}</span>
+          </div>
+          <span class="chip ${cls}">${escapeHtml(label)}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function pollRemedyQueue() {
+  if (!activePortalInstanceId) {
+    stopRemedyPolling();
+    return;
+  }
+  const instId = activePortalInstanceId;
+  try {
+    const { ok, data } = await apiFetch(`/api/instances/${instId}/remedy-queue`);
+    if (activePortalInstanceId !== instId) return;
+    if (ok && data.ok) {
+      renderRemedyQueue(data);
+      if (data.status !== "running" && data.status !== "starting") {
+        stopRemedyPolling();
+      }
+    }
+  } catch (e) {}
+}
+
+function ensureRemedyPolling() {
+  stopRemedyPolling();
+  remedyPollTimer = setInterval(pollRemedyQueue, 2000);
+}
 
 function renderPortalCourseTabs() {
   const box = $("#portal-course-tabs");
@@ -1195,7 +1326,10 @@ function getChapterStatus(pt) {
 }
 
 function renderChapterItemHtml(pt, typeLabelMap) {
+  const cid = String(portalChaptersCourseId || "");
   const kid = String(pt.id);
+  const chKey = getTargetKey(cid, kid, "");
+  const isChSelected = Boolean(portalSelectedTargets[chKey]);
   const st = getChapterStatus(pt);
   let stBadge = "";
   if (st === "completed") {
@@ -1235,11 +1369,18 @@ function renderChapterItemHtml(pt, typeLabelMap) {
               const viewBtn = card.view_url
                 ? `<a class="btn btn-tonal btn-sm" href="${escapeHtml(card.view_url)}" target="_blank" rel="noopener noreferrer">免登录查看测验/成绩 ↗</a>`
                 : "";
+              let pickBtn = "";
+              if (card.type === "workid" && card.jobid) {
+                const wKey = getTargetKey(cid, kid, card.jobid);
+                const isWorkSel = Boolean(portalSelectedTargets[wKey]);
+                pickBtn = `<button type="button" class="btn ${isWorkSel ? "btn-primary" : "btn-outlined"} btn-sm btn-remedy-pick-work" data-cid="${escapeHtml(cid)}" data-kid="${escapeHtml(kid)}" data-ch-title="${escapeHtml(pt.title || `章节 ${kid}`)}" data-jobid="${escapeHtml(card.jobid)}" data-work-name="${escapeHtml(card.name || card.jobid)}">${isWorkSel ? "✓ 已加入队列" : "+ 加入补救队列"}</button>`;
+              }
               return `
                 <div class="portal-card-row">
                   <span class="chip chip-neutral">${escapeHtml(tLabel)}</span>
                   <span class="portal-card-name">${escapeHtml(card.name)}</span>
                   ${passChip}
+                  ${pickBtn}
                   ${viewBtn}
                 </div>
               `;
@@ -1253,6 +1394,7 @@ function renderChapterItemHtml(pt, typeLabelMap) {
   return `
     <div class="portal-chapter-item">
       <div class="portal-chapter-head" data-kid="${escapeHtml(kid)}">
+        <input type="checkbox" class="portal-ch-chk" data-cid="${escapeHtml(cid)}" data-kid="${escapeHtml(kid)}" data-title="${escapeHtml(pt.title || `章节 ${kid}`)}" ${isChSelected ? "checked" : ""} />
         <span class="portal-chapter-title">${escapeHtml(pt.title || `章节 ${kid}`)}</span>
         <div class="btn-group">
           ${stBadge}
@@ -1409,6 +1551,61 @@ $("#portal-course-tabs").addEventListener("click", (e) => {
 });
 
 $("#portal-chapter-list").addEventListener("click", (e) => {
+  if (e.target.classList.contains("portal-ch-chk")) {
+    const chk = e.target;
+    const cid = chk.dataset.cid;
+    const kid = chk.dataset.kid;
+    const chTitle = chk.dataset.title || `章节 ${kid}`;
+    const key = getTargetKey(cid, kid, "");
+    if (chk.checked) {
+      const cMeta = portalCoursesList.find((x) => String(x.id) === String(cid)) || {};
+      portalSelectedTargets[key] = {
+        course_id: cid,
+        course_title: cMeta.title || (portalCatalogData && portalCatalogData.title) || cid,
+        clazz_id: (portalCatalogData && portalCatalogData.clazzId) || cMeta.clazzId || "",
+        cpi: (portalCatalogData && portalCatalogData.cpi) || cMeta.cpi || "",
+        knowledge_id: kid,
+        chapter_title: chTitle,
+        jobid: "",
+        work_name: "",
+      };
+    } else {
+      delete portalSelectedTargets[key];
+    }
+    updatePortalSelectionUi();
+    return;
+  }
+
+  const pickBtn = e.target.closest(".btn-remedy-pick-work");
+  if (pickBtn) {
+    const cid = pickBtn.dataset.cid;
+    const kid = pickBtn.dataset.kid;
+    const jobid = pickBtn.dataset.jobid;
+    const key = getTargetKey(cid, kid, jobid);
+    if (portalSelectedTargets[key]) {
+      delete portalSelectedTargets[key];
+    } else {
+      const cMeta = portalCoursesList.find((x) => String(x.id) === String(cid)) || {};
+      portalSelectedTargets[key] = {
+        course_id: cid,
+        course_title: cMeta.title || (portalCatalogData && portalCatalogData.title) || cid,
+        clazz_id: (portalCatalogData && portalCatalogData.clazzId) || cMeta.clazzId || "",
+        cpi: (portalCatalogData && portalCatalogData.cpi) || cMeta.cpi || "",
+        knowledge_id: kid,
+        chapter_title: pickBtn.dataset.chTitle || `章节 ${kid}`,
+        jobid,
+        work_name: pickBtn.dataset.workName || jobid,
+      };
+    }
+    updatePortalSelectionUi();
+    renderPortalChapters();
+    return;
+  }
+
+  if (e.target.closest(".portal-chapter-cards")) {
+    return;
+  }
+
   const unitHead = e.target.closest(".portal-unit-head");
   if (unitHead) {
     const idx = unitHead.dataset.unitIdx;
@@ -1420,6 +1617,95 @@ $("#portal-chapter-list").addEventListener("click", (e) => {
   if (chHead && chHead.dataset.kid) {
     window.togglePortalChapterCards(chHead.dataset.kid);
   }
+});
+
+$("#btn-portal-select-visible").addEventListener("click", () => {
+  const cMeta = portalCoursesList.find((x) => String(x.id) === String(portalChaptersCourseId)) || {};
+  document.querySelectorAll("#portal-chapter-list .portal-ch-chk").forEach((chk) => {
+    chk.checked = true;
+    const cid = chk.dataset.cid;
+    const kid = chk.dataset.kid;
+    const key = getTargetKey(cid, kid, "");
+    portalSelectedTargets[key] = {
+      course_id: cid,
+      course_title: cMeta.title || (portalCatalogData && portalCatalogData.title) || cid,
+      clazz_id: (portalCatalogData && portalCatalogData.clazzId) || cMeta.clazzId || "",
+      cpi: (portalCatalogData && portalCatalogData.cpi) || cMeta.cpi || "",
+      knowledge_id: kid,
+      chapter_title: chk.dataset.title || `章节 ${kid}`,
+      jobid: "",
+      work_name: "",
+    };
+  });
+  updatePortalSelectionUi();
+});
+
+$("#btn-portal-clear-selected").addEventListener("click", () => {
+  portalSelectedTargets = {};
+  updatePortalSelectionUi();
+  renderPortalChapters();
+});
+
+$("#btn-remedy-start").addEventListener("click", async () => {
+  if (!activePortalInstanceId) return;
+  const items = Object.values(portalSelectedTargets);
+  if (!items.length) {
+    showToast("请先勾选需要补救/重做的章节或测验", true);
+    return;
+  }
+  const apiProfileId = $("#portal-remedy-api").value;
+  if (!apiProfileId && !cachedApiItems.length) {
+    showToast("请先在「AI API」页面添加至少一个配置", true);
+    return;
+  }
+  const btn = $("#btn-remedy-start");
+  btn.disabled = true;
+  try {
+    const { ok, data } = await apiFetch(`/api/instances/${activePortalInstanceId}/remedy-queue/start`, {
+      method: "POST",
+      body: JSON.stringify({
+        items,
+        api_profile_id: apiProfileId,
+        no_cache: $("#portal-remedy-nocache").checked,
+      }),
+    });
+    if (!ok || !data.ok) {
+      showToast(data.error || "启动排队答题失败", true);
+      return;
+    }
+    renderRemedyQueue(data);
+    ensureRemedyPolling();
+    showToast(`已启动排队答题，共 ${items.length} 项`);
+  } finally {
+    updatePortalSelectionUi();
+  }
+});
+
+$("#btn-remedy-stop").addEventListener("click", async () => {
+  if (!activePortalInstanceId) return;
+  const { ok, data } = await apiFetch(`/api/instances/${activePortalInstanceId}/remedy-queue/stop`, {
+    method: "POST",
+  });
+  if (!ok || !data.ok) {
+    showToast(data.error || "停止队列失败", true);
+    return;
+  }
+  stopRemedyPolling();
+  renderRemedyQueue(data);
+  showToast("已停止排队答题");
+});
+
+$("#btn-remedy-clear").addEventListener("click", async () => {
+  if (!activePortalInstanceId) return;
+  const { ok, data } = await apiFetch(`/api/instances/${activePortalInstanceId}/remedy-queue`, {
+    method: "DELETE",
+  });
+  if (!ok || !data.ok) {
+    showToast(data.error || "清空队列失败", true);
+    return;
+  }
+  renderRemedyQueue(data);
+  showToast("已清空队列记录");
 });
 
 $("#btn-portal-toggle-units").addEventListener("click", () => {
@@ -1455,13 +1741,32 @@ window.openChaoxingPortal = async (id, name, refresh = false) => {
   portalChaptersList = [];
   portalCardsCache = {};
   portalCollapsedUnits = {};
+  portalSelectedTargets = {};
+  currentRemedyQueueData = null;
+  stopRemedyPolling();
+  updatePortalSelectionUi();
+
+  const instObj = cachedInstances.find((x) => x.id === id);
+  populateRemedyApiSelect(instObj ? instObj.api_profile_id : "");
+
   $("#portal-modal-title").textContent = `学习通章节与测验 · ${name}`;
   $("#portal-warning").classList.add("hidden");
   $("#portal-failed-wrap").classList.add("hidden");
   $("#portal-progress-card").classList.add("hidden");
   $("#portal-course-tabs").innerHTML = `<div class="empty-hint">${refresh ? "正在刷新课程信息..." : "正在加载课程..."}</div>`;
   $("#portal-chapter-list").innerHTML = `<div class="empty-hint">正在读取课程列表...</div>`;
+  $("#portal-remedy-list").innerHTML = `<div class="empty-hint">加载队列状态中...</div>`;
   $("#portal-modal").classList.remove("hidden");
+
+  pollRemedyQueue().then(() => {
+    if (
+      activePortalInstanceId === id &&
+      currentRemedyQueueData &&
+      (currentRemedyQueueData.status === "running" || currentRemedyQueueData.status === "starting")
+    ) {
+      ensureRemedyPolling();
+    }
+  });
 
   const qs = refresh ? "?refresh=1" : "";
   try {

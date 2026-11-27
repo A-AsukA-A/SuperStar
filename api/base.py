@@ -140,6 +140,7 @@ class Chaoxing:
         self.kwargs = kwargs
         self.rollback_times = 0
         self.progress_reporter = None
+        self.last_work_notes: dict[str, dict[str, str]] = {}
         self.rate_limiter = RateLimiter(0.5)  # 其他接口速率限制比较松
         self.video_log_limiter = RateLimiter(2)  # 上报进度极其容易卡验证码，限制2s一次
 
@@ -981,9 +982,11 @@ class Chaoxing:
         _retry_times = 1 if getattr(self, "force_redo", False) else 3
         _retry_delay = 0 if getattr(self, "force_redo", False) else 1
 
+        _jobid_str = str(_job.get("jobid") or "")
+
         @with_retry(max_retries=_retry_times, delay=_retry_delay)
         def fetch_response():
-            return _session.get(
+            _r = _session.get(
                 _url,
                 params={
                     "api": "1",
@@ -1003,6 +1006,20 @@ class Chaoxing:
                     "courseid": _course["courseId"],
                 }
             )
+            if getattr(self, "force_redo", False) and _r.status_code == 200:
+                _q_check = decode_questions_info(_r.text)
+                if not _q_check.get("questions"):
+                    import html as _html
+                    _redo_m = re.search(
+                        r"""['"]((?:https?:)?//mooc1\.chaoxing\.com)?(/mooc-ans/work/doHomeWorkNew\?[^'"]*(?:isredo|redo)[^'"]*)['"]""",
+                        _r.text,
+                        re.I,
+                    )
+                    if _redo_m:
+                        _redo_url = "https://mooc1.chaoxing.com" + _html.unescape(_redo_m.group(2))
+                        logger.info(f"检测到重做测验入口，正在进入作答页面...")
+                        _r = _session.get(_redo_url)
+            return _r
 
         final_resp = {}
         questions = {}
@@ -1012,8 +1029,16 @@ class Chaoxing:
         except Exception as e:
             # 强制重做模式下，取不到题目通常说明该测验已提交/已完成，直接跳过
             if getattr(self, "force_redo", False):
+                self.last_work_notes[_jobid_str] = {
+                    "code": "locked",
+                    "message": "该测验已批阅且平台未开放重做入口",
+                }
                 logger.warning(f"该测验已提交或无法再次作答，跳过: {e}")
                 return StudyResult.SUCCESS
+            self.last_work_notes[_jobid_str] = {
+                "code": "error",
+                "message": f"读取测验失败：{e}",
+            }
             logger.error(f"请求失败: {e}")
             return StudyResult.ERROR
 
@@ -1189,8 +1214,13 @@ class Chaoxing:
             if res.status_code == 200:
                 res_json = res.json()
                 if res_json["status"]:
-                    logger.info(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题成功 -> {res_json["msg"]}')
+                    act_word = "提交" if questions["pyFlag"] == "" else "保存"
+                    logger.info(f'{act_word}答题成功 -> {res_json["msg"]}')
                     if questions["pyFlag"] == "" and res_json.get("stuStatus") == 5:
+                        self.last_work_notes[_jobid_str] = {
+                            "code": "failed_grade",
+                            "message": "提交成功，但未达到及格线（stuStatus=5）",
+                        }
                         logger.warning("本次提交未达到及格线（stuStatus=5），任务点不会恢复，需要重做该测验")
                         self._record_failed_work(
                             str(_course.get("title", "")),
@@ -1198,10 +1228,28 @@ class Chaoxing:
                             f'{_course.get("courseId")}-{_job.get("jobid")}',
                             _question_list,
                         )
+                    elif questions["pyFlag"] == "1":
+                        self.last_work_notes[_jobid_str] = {
+                            "code": "saved",
+                            "message": f"已暂存答题草稿（{res_json.get('msg', '')}）",
+                        }
+                    else:
+                        self.last_work_notes[_jobid_str] = {
+                            "code": "submitted",
+                            "message": f"提交答题成功（{res_json.get('msg', 'success')}）",
+                        }
                 else:
+                    self.last_work_notes[_jobid_str] = {
+                        "code": "error",
+                        "message": f'答题提交失败：{res_json.get("msg", "")}',
+                    }
                     logger.error(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题失败 -> {res_json["msg"]}')
                     return StudyResult.ERROR
             else:
+                self.last_work_notes[_jobid_str] = {
+                    "code": "error",
+                    "message": f"答题提交失败（HTTP {res.status_code}）",
+                }
                 logger.error(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题失败 -> {res.text}')
                 return StudyResult.ERROR
             return StudyResult.SUCCESS

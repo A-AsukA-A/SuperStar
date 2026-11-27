@@ -452,6 +452,32 @@ code {
   background: var(--surface); border-radius: 8px; padding: 6px 9px; font-size: 0.81rem;
 }
 .portal-card-name { flex: 1; min-width: 0; color: var(--text); word-break: break-word; }
+.portal-ch-chk {
+  width: 15px; height: 15px; cursor: pointer; flex-shrink: 0; accent-color: var(--primary);
+}
+.portal-remedy-box {
+  background: var(--surface); border: 1px solid var(--border-light); border-radius: 14px; padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.portal-remedy-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; justify-content: space-between;
+}
+.remedy-api-select {
+  padding: 6px 10px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 0.84rem; min-width: 180px;
+}
+.portal-remedy-list {
+  display: block; max-height: 200px; overflow-y: auto; padding-right: 2px;
+}
+.portal-remedy-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--surface-variant); border-radius: 10px; padding: 7px 10px; margin-bottom: 6px;
+  font-size: 0.81rem;
+}
+.portal-remedy-row:last-child { margin-bottom: 0; }
+.portal-remedy-info { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 2px; }
+.portal-remedy-name { font-weight: 500; color: var(--text); word-break: break-word; }
+.portal-remedy-msg { font-size: 0.76rem; color: var(--text-secondary); word-break: break-word; }
 a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 
 .toast {

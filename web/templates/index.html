@@ -349,12 +349,34 @@
             <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="pending">待完成</button>
             <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="completed">已完成</button>
             <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="none">无任务点</button>
+            <button type="button" id="btn-portal-select-visible" class="btn btn-outlined btn-sm">全选当前章</button>
+            <button type="button" id="btn-portal-clear-selected" class="btn btn-text btn-sm">清空勾选</button>
+            <span id="portal-selected-chip" class="chip chip-neutral">已选 0 项</span>
             <button type="button" id="btn-portal-toggle-units" class="btn btn-text btn-sm">全部折叠</button>
           </div>
           <input type="text" id="portal-chapter-search" class="toolbar-input" placeholder="搜索章节标题..." />
         </div>
         <div id="portal-chapter-list" class="portal-chapter-list">
           <div class="empty-hint">请选择课程查看官网同步章节完成度</div>
+        </div>
+      </div>
+
+      <div id="portal-remedy-box" class="portal-remedy-box" style="margin-bottom: 12px;">
+        <div class="box-head">
+          <span>手动补救 / 重做测验排队答题</span>
+          <span id="portal-remedy-summary" class="chip chip-neutral">未开始</span>
+        </div>
+        <div class="portal-remedy-controls">
+          <select id="portal-remedy-api" class="remedy-api-select"></select>
+          <label class="log-toggle"><input type="checkbox" id="portal-remedy-nocache" /> 重做时忽略题库缓存</label>
+          <div class="btn-group">
+            <button type="button" id="btn-remedy-start" class="btn btn-primary btn-sm">开始排队答题 (0)</button>
+            <button type="button" id="btn-remedy-stop" class="btn btn-danger btn-sm hidden">停止队列</button>
+            <button type="button" id="btn-remedy-clear" class="btn btn-text btn-sm">清空队列</button>
+          </div>
+        </div>
+        <div id="portal-remedy-list" class="portal-remedy-list">
+          <div class="empty-hint">在上方勾选需要补救或重做测验的章节（或展开章节加入指定测验），点击「开始排队答题」由 API 自动顺序完成</div>
         </div>
       </div>
 

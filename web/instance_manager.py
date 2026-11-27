@@ -156,6 +156,7 @@ class InstanceManager:
         self._lock = threading.RLock()
         self._local_procs: dict[str, subprocess.Popen] = {}
         self._local_ps: dict[str, psutil.Process] = {}
+        self._remedy_procs: dict[str, subprocess.Popen] = {}
         os.makedirs(self.instances_dir, exist_ok=True)
 
     def _inst_dir(self, instance_id: str) -> str:
@@ -574,6 +575,7 @@ class InstanceManager:
             meta = _read_json(os.path.join(inst_dir, "meta.json"))
             if not meta:
                 raise KeyError("未找到指定任务")
+            self.stop_remedy_queue(instance_id)
             self.stop_instance(instance_id)
             shutil.rmtree(inst_dir, ignore_errors=True)
 
@@ -967,6 +969,267 @@ class InstanceManager:
             banner_text="已通过任务保存的 Cookie 免登录加载学习通测验 / 成绩原页（只读核查视图）",
         )
         return html, final_url
+
+    # ---------------- 手动补救 / 重做测验排队任务 ----------------
+
+    def _is_remedy_running(self, instance_id: str, queue_data: dict[str, Any] | None) -> bool:
+        proc = self._remedy_procs.get(instance_id)
+        if proc is not None:
+            if proc.poll() is None:
+                return True
+            self._remedy_procs.pop(instance_id, None)
+            return False
+
+        pid = (queue_data or {}).get("pid")
+        if pid:
+            try:
+                p = psutil.Process(int(pid))
+                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                    cmdline = " ".join(p.cmdline())
+                    if "remedy_worker.py" in cmdline and instance_id in cmdline:
+                        return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                pass
+        return False
+
+    def get_remedy_queue(self, instance_id: str) -> dict[str, Any]:
+        inst_dir = self._inst_dir(instance_id)
+        if not _read_json(os.path.join(inst_dir, "meta.json")):
+            raise KeyError("未找到指定任务")
+
+        queue_path = os.path.join(inst_dir, "remedy_queue.json")
+        data = _read_json(queue_path)
+        if not data:
+            return {
+                "status": "idle",
+                "total": 0,
+                "done_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0,
+                "current_index": 0,
+                "items": [],
+            }
+
+        running = self._is_remedy_running(instance_id, data)
+        if not running and data.get("status") in ("starting", "running"):
+            data["status"] = "stopped"
+            for item in data.get("items") or []:
+                if item.get("status") in ("pending", "running"):
+                    item["status"] = "stopped"
+                    if item.get("message") in ("等待排队", "正在拉取章节测验...") or str(item.get("message") or "").startswith(("答题中", "提交中", "保存中")):
+                        item["message"] = "任务已停止"
+            data["updated_at"] = int(time.time())
+            _atomic_write_json(queue_path, data)
+        return data
+
+    def start_remedy_queue(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        inst_dir = self._inst_dir(instance_id)
+        meta_path = os.path.join(inst_dir, "meta.json")
+        meta = _read_json(meta_path)
+        if not meta:
+            raise KeyError("未找到指定任务")
+
+        cookies_path = os.path.join(inst_dir, "cookies.txt")
+        if not use_cookies(cookies_path):
+            raise ValueError("当前任务暂无有效 Cookie，请先点击卡片「登录」重新扫码")
+
+        raw_items = payload.get("items") or []
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError("请至少勾选或加入 1 个章节/测验任务")
+        if len(raw_items) > 100:
+            raise ValueError("单次排队最多支持 100 项，请分批处理")
+
+        api_profile_id = str(payload.get("api_profile_id") or meta.get("api_profile_id") or "").strip()
+        api_profile = api_store.get_profile(api_profile_id, masked=False) if api_profile_id else None
+        if api_profile is None:
+            all_profiles = api_store.list_profiles(masked=False)
+            api_profile = next((p for p in all_profiles if p.get("is_default")), all_profiles[0] if all_profiles else None)
+        if api_profile is None:
+            raise ValueError("请先在「AI API」页面添加至少一个 AI 答题配置")
+
+        course_links = dict(meta.get("course_links") or {})
+        missing_cids = [
+            str(it.get("course_id") or "").strip()
+            for it in raw_items
+            if isinstance(it, dict)
+            and not ((course_links.get(str(it.get("course_id") or "").strip()) or {}).get("clazzId"))
+        ]
+        if missing_cids:
+            self.get_instance_portal(instance_id, refresh=False)
+            meta = _read_json(meta_path) or meta
+            course_links = dict(meta.get("course_links") or {})
+
+        course_titles = meta.get("course_titles") or {}
+        normalized_items: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str, str]] = set()
+        course_id_set: list[str] = []
+
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            cid = str(raw.get("course_id") or "").strip()
+            kid = str(raw.get("knowledge_id") or "").strip()
+            jobid = str(raw.get("jobid") or "").strip()
+            if not (re.fullmatch(r"\d{1,30}", cid) and re.fullmatch(r"\d{1,30}", kid)):
+                raise ValueError("队列包含非法的课程 ID 或章节 ID")
+            if jobid and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", jobid):
+                raise ValueError("队列包含非法的测验 jobid")
+
+            dedup_key = (cid, kid, jobid)
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+            if cid not in course_id_set:
+                course_id_set.append(cid)
+
+            link_info = course_links.get(cid) or {}
+            clazz_id = str(raw.get("clazz_id") or link_info.get("clazzId") or "").strip()
+            cpi = str(raw.get("cpi") or link_info.get("cpi") or "").strip()
+            if not (clazz_id and cpi):
+                raise ValueError(f"课程 {cid} 缺少 clazzId/cpi 参数，请先刷新课程数据")
+
+            ctitle = str(raw.get("course_title") or course_titles.get(cid) or link_info.get("title") or cid)
+            ch_title = str(raw.get("chapter_title") or f"章节 {kid}")
+            work_name = str(raw.get("work_name") or "")
+            normalized_items.append(
+                {
+                    "course_id": cid,
+                    "course_title": ctitle,
+                    "clazz_id": clazz_id,
+                    "cpi": cpi,
+                    "knowledge_id": kid,
+                    "chapter_title": ch_title,
+                    "jobid": jobid,
+                    "work_name": work_name,
+                    "status": "pending",
+                    "message": "等待排队",
+                    "started_at": None,
+                    "finished_at": None,
+                }
+            )
+
+        if not normalized_items:
+            raise ValueError("请至少勾选或加入 1 个有效章节/测验任务")
+
+        no_cache = bool(payload.get("no_cache", False))
+
+        with self._lock:
+            queue_path = os.path.join(inst_dir, "remedy_queue.json")
+            existing = _read_json(queue_path)
+            if self._is_remedy_running(instance_id, existing):
+                raise ValueError("当前已有补救排队任务正在执行，请先停止或等待完成")
+
+            cfg_path = os.path.join(inst_dir, "remedy_config.ini")
+            cfg_content = self._build_instance_config(course_id_set, 2.0, 1, "continue", api_profile)
+            with open(cfg_path, "w", encoding="utf8") as fp:
+                fp.write(cfg_content)
+
+            now = int(time.time())
+            queue_data: dict[str, Any] = {
+                "status": "starting",
+                "api_profile_id": api_profile.get("id"),
+                "api_profile_name": api_profile.get("name", "AI"),
+                "no_cache": no_cache,
+                "total": len(normalized_items),
+                "done_count": 0,
+                "skipped_count": 0,
+                "failed_count": 0,
+                "current_index": 0,
+                "items": normalized_items,
+                "pid": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            _atomic_write_json(queue_path, queue_data)
+
+            cmd = [
+                sys.executable,
+                os.path.join(ROOT_DIR, "remedy_worker.py"),
+                "--queue-file",
+                queue_path,
+                "--cookies-path",
+                cookies_path,
+                "--config-path",
+                cfg_path,
+            ]
+            if no_cache:
+                cmd.append("--no-cache")
+
+            env = {
+                **os.environ,
+                "PYTHONUTF8": "1",
+                "PYTHONIOENCODING": "utf-8",
+                "CHAOXING_BANK_PATH": os.path.join(ROOT_DIR, "data", "question_bank.sqlite3"),
+                "PYTHONPATH": ROOT_DIR + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""),
+            }
+            log_fp = open(os.path.join(inst_dir, "remedy.log"), "a", encoding="utf8")
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=inst_dir,
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                )
+            finally:
+                log_fp.close()
+
+            self._remedy_procs[instance_id] = proc
+            queue_data["pid"] = proc.pid
+            _atomic_write_json(queue_path, queue_data)
+            return queue_data
+
+    def stop_remedy_queue(self, instance_id: str) -> dict[str, Any]:
+        with self._lock:
+            inst_dir = self._inst_dir(instance_id)
+            if not _read_json(os.path.join(inst_dir, "meta.json")):
+                raise KeyError("未找到指定任务")
+
+            queue_path = os.path.join(inst_dir, "remedy_queue.json")
+            data = _read_json(queue_path)
+            pid = (data or {}).get("pid")
+            proc = self._remedy_procs.pop(instance_id, None)
+            target_pid = (proc.pid if proc is not None and proc.poll() is None else None) or pid
+            if target_pid:
+                try:
+                    p = psutil.Process(int(target_pid))
+                    children = p.children(recursive=True)
+                    for ch in children:
+                        ch.terminate()
+                    p.terminate()
+                    _, alive = psutil.wait_procs([p, *children], timeout=3)
+                    for a in alive:
+                        a.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                    pass
+
+            if data:
+                if data.get("status") in ("starting", "running"):
+                    data["status"] = "stopped"
+                for item in data.get("items") or []:
+                    if item.get("status") in ("pending", "running"):
+                        item["status"] = "stopped"
+                        item["message"] = "已手动停止"
+                data["updated_at"] = int(time.time())
+                _atomic_write_json(queue_path, data)
+                return data
+            return self.get_remedy_queue(instance_id)
+
+    def clear_remedy_queue(self, instance_id: str) -> dict[str, Any]:
+        with self._lock:
+            inst_dir = self._inst_dir(instance_id)
+            if not _read_json(os.path.join(inst_dir, "meta.json")):
+                raise KeyError("未找到指定任务")
+            queue_path = os.path.join(inst_dir, "remedy_queue.json")
+            existing = _read_json(queue_path)
+            if self._is_remedy_running(instance_id, existing):
+                raise ValueError("队列正在运行，请先停止后再清空")
+            if os.path.exists(queue_path):
+                try:
+                    os.remove(queue_path)
+                except OSError:
+                    pass
+            return self.get_remedy_queue(instance_id)
 
 
 instance_manager = InstanceManager()
