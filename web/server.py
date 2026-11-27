@@ -393,6 +393,28 @@ def create_app() -> Flask:
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.get("/api/instances/<instance_id>/portal")
+    def get_instance_portal(instance_id: str):
+        refresh = request.args.get("refresh", "").lower() in {"1", "true", "yes"}
+        try:
+            data = instance_manager.get_instance_portal(instance_id, refresh=refresh)
+            return jsonify({"ok": True, **data})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.put("/api/instances/<instance_id>/options")
+    def update_instance_options(instance_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            item = instance_manager.update_instance_options(instance_id, payload)
+            return jsonify({"ok": True, "item": item})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     # ---------------- 按课程划分的自建题库 ----------------
 
     @app.get("/api/bank/courses")

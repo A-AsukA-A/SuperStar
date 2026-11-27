@@ -18,6 +18,7 @@ from typing import Any
 
 import psutil
 
+from api.base import fetch_courses_with_cookies
 from api.cookies import parse_cookie_string, save_cookies_dict, use_cookies
 from web.api_store import api_store
 from web.session_store import session_store
@@ -46,6 +47,13 @@ def mask_sensitive_log(text: str) -> str:
         masked,
     )
     return masked
+
+
+def _build_chaoxing_course_url(course_id: str, clazz_id: str, cpi: str) -> str:
+    return (
+        f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
+        f"?courseid={course_id}&clazzid={clazz_id}&cpi={cpi}&ut=s"
+    )
 
 
 def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
@@ -388,6 +396,22 @@ class InstanceManager:
                 f.write(cfg_content)
 
             course_titles = payload.get("course_titles") if isinstance(payload.get("course_titles"), dict) else {}
+            raw_links = payload.get("course_links") if isinstance(payload.get("course_links"), dict) else {}
+            course_links: dict[str, dict[str, str]] = {}
+            for cid_key, link_info in raw_links.items():
+                if not isinstance(link_info, dict):
+                    continue
+                cid_str = str(cid_key).strip()
+                clazz_id = str(link_info.get("clazzId") or "").strip()
+                cpi = str(link_info.get("cpi") or "").strip()
+                if cid_str and clazz_id and cpi:
+                    course_links[cid_str] = {
+                        "clazzId": clazz_id,
+                        "cpi": cpi,
+                        "title": str(link_info.get("title") or course_titles.get(cid_str, "")),
+                        "teacher": str(link_info.get("teacher") or ""),
+                        "url": _build_chaoxing_course_url(cid_str, clazz_id, cpi),
+                    }
 
             meta: dict[str, Any] = {
                 "id": instance_id,
@@ -396,6 +420,7 @@ class InstanceManager:
                 "pid": None,
                 "courses": courses,
                 "course_titles": {str(k): str(v) for k, v in course_titles.items()},
+                "course_links": course_links,
                 "speed": speed,
                 "jobs": jobs,
                 "notopen_action": notopen_action,
@@ -558,6 +583,122 @@ class InstanceManager:
                 raise KeyError("未找到指定任务")
             save_cookies_dict(cookies, path=os.path.join(inst_dir, "cookies.txt"))
             return self.get_instance(instance_id)  # type: ignore[return-value]
+
+    def update_instance_options(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            inst_dir = self._inst_dir(instance_id)
+            meta_path = os.path.join(inst_dir, "meta.json")
+            meta = _read_json(meta_path)
+            if not meta:
+                raise KeyError("未找到指定任务")
+            if "redo_finished" in payload:
+                meta["redo_finished"] = bool(payload["redo_finished"])
+            if "no_cache" in payload:
+                meta["no_cache"] = bool(payload["no_cache"])
+            _atomic_write_json(meta_path, meta)
+            return self.get_instance(instance_id)  # type: ignore[return-value]
+
+    def get_instance_portal(self, instance_id: str, refresh: bool = False) -> dict[str, Any]:
+        inst_dir = self._inst_dir(instance_id)
+        meta_path = os.path.join(inst_dir, "meta.json")
+        meta = _read_json(meta_path)
+        if not meta:
+            raise KeyError("未找到指定任务")
+
+        course_ids = [str(c) for c in (meta.get("courses") or [])]
+        course_titles = {str(k): str(v) for k, v in (meta.get("course_titles") or {}).items()}
+        course_links = {
+            str(k): dict(v)
+            for k, v in (meta.get("course_links") or {}).items()
+            if isinstance(v, dict)
+        }
+
+        warning = ""
+        need_fetch = refresh or any(
+            not (course_links.get(cid) or {}).get("clazzId") or not (course_links.get(cid) or {}).get("cpi")
+            for cid in course_ids
+        )
+        if need_fetch and course_ids:
+            cookies = use_cookies(os.path.join(inst_dir, "cookies.txt"))
+            if not cookies:
+                warning = "当前任务未找到有效 Cookie，暂无法自动生成课程直达链接，可先打开学习通首页或通过卡片「登录」更新扫码。"
+            else:
+                try:
+                    fetched = fetch_courses_with_cookies(cookies)
+                    fetched_map = {str(item.get("courseId", "")): item for item in fetched if item.get("courseId")}
+                    changed = False
+                    for cid in course_ids:
+                        item = fetched_map.get(cid)
+                        if not item:
+                            continue
+                        clazz_id = str(item.get("clazzId") or "").strip()
+                        cpi = str(item.get("cpi") or "").strip()
+                        title = str(item.get("title") or course_titles.get(cid) or "").strip()
+                        teacher = str(item.get("teacher") or "").strip()
+                        if title and not course_titles.get(cid):
+                            course_titles[cid] = title
+                            changed = True
+                        if clazz_id and cpi:
+                            new_entry = {
+                                "clazzId": clazz_id,
+                                "cpi": cpi,
+                                "title": title,
+                                "teacher": teacher,
+                                "url": _build_chaoxing_course_url(cid, clazz_id, cpi),
+                            }
+                            if course_links.get(cid) != new_entry:
+                                course_links[cid] = new_entry
+                                changed = True
+                    if changed:
+                        with self._lock:
+                            latest_meta = _read_json(meta_path) or meta
+                            latest_meta["course_titles"] = course_titles
+                            latest_meta["course_links"] = course_links
+                            _atomic_write_json(meta_path, latest_meta)
+                            meta = latest_meta
+                except Exception as exc:
+                    warning = f"自动获取课程直达链接失败（可能 Cookie 已过期，可先通过「登录」重新扫码）：{exc}"
+
+        courses_view: list[dict[str, Any]] = []
+        for cid in course_ids:
+            info = course_links.get(cid) or {}
+            clazz_id = str(info.get("clazzId") or "")
+            cpi = str(info.get("cpi") or "")
+            direct = bool(clazz_id and cpi)
+            courses_view.append(
+                {
+                    "id": cid,
+                    "title": str(course_titles.get(cid) or info.get("title") or f"课程 {cid}"),
+                    "teacher": str(info.get("teacher") or ""),
+                    "clazzId": clazz_id,
+                    "cpi": cpi,
+                    "direct": direct,
+                    "url": _build_chaoxing_course_url(cid, clazz_id, cpi) if direct else "https://i.chaoxing.com/base",
+                }
+            )
+
+        failed_works_md = ""
+        failed_path = os.path.join(inst_dir, "未通过测验记录.md")
+        if os.path.exists(failed_path):
+            try:
+                with open(failed_path, "r", encoding="utf8", errors="replace") as fp:
+                    content = fp.read()
+                failed_works_md = content[-30000:] if len(content) > 30000 else content
+            except OSError:
+                failed_works_md = ""
+
+        status_view = self._build_status_view(inst_dir, meta)
+        return {
+            "id": instance_id,
+            "name": meta.get("name", instance_id),
+            "portal_url": "https://i.chaoxing.com/base",
+            "courses": courses_view,
+            "redo_finished": bool(meta.get("redo_finished", False)),
+            "no_cache": bool(meta.get("no_cache", False)),
+            "runtime_status": status_view.get("runtime_status", "stopped"),
+            "failed_works_md": failed_works_md,
+            "warning": warning,
+        }
 
 
 instance_manager = InstanceManager()

@@ -15,6 +15,7 @@ let cachedInstances = [];
 let monitorEventSource = null;
 let logPollTimer = null;
 let activeLogInstanceId = null;
+let activePortalInstanceId = null;
 
 function showToast(msg, isError = false) {
   const el = $("#toast");
@@ -86,6 +87,8 @@ function closeModalById(id) {
       clearInterval(logPollTimer);
       logPollTimer = null;
     }
+  } else if (id === "portal-modal") {
+    activePortalInstanceId = null;
   }
 }
 
@@ -319,6 +322,8 @@ function renderInstances(items) {
           <div class="inst-tags">
             <span class="chip chip-neutral">${escapeHtml(inst.api_profile_name)}</span>
             <span class="chip chip-neutral">${inst.speed}x · ${inst.jobs}并发</span>
+            ${inst.redo_finished ? `<span class="chip chip-warn">重做测验</span>` : ""}
+            ${inst.no_cache ? `<span class="chip chip-neutral">禁用缓存</span>` : ""}
             ${resChip}
           </div>
 
@@ -328,6 +333,7 @@ function renderInstances(items) {
                 ? `<button class="btn btn-danger btn-sm" onclick="stopInstance('${inst.id}')">停止</button>`
                 : `<button class="btn btn-primary btn-sm" onclick="startInstance('${inst.id}')">启动</button>`
             }
+            <button class="btn btn-tonal btn-sm" onclick="openChaoxingPortal('${inst.id}', '${escapeHtml(inst.name)}')">学习通后台</button>
             <button class="btn btn-outlined btn-sm" onclick="openReauthModal('${inst.id}', '${escapeHtml(inst.name)}')">登录</button>
             <button class="btn btn-outlined btn-sm" onclick="openInstanceLogs('${inst.id}', '${escapeHtml(inst.name)}')">日志</button>
             <button class="btn btn-text btn-sm" onclick="deleteInstance('${inst.id}')">删除</button>
@@ -746,7 +752,7 @@ function renderCourseList(filterText = "") {
     .map(
       (c) => `
       <label class="course-item">
-        <input type="checkbox" class="course-chk" value="${escapeHtml(c.courseId)}" data-title="${escapeHtml(c.title)}" />
+        <input type="checkbox" class="course-chk" value="${escapeHtml(c.courseId)}" data-title="${escapeHtml(c.title)}" data-clazzid="${escapeHtml(c.clazzId || "")}" data-cpi="${escapeHtml(c.cpi || "")}" data-teacher="${escapeHtml(c.teacher || "")}" />
         <div class="course-item-meta">
           <span>${escapeHtml(c.title)}</span>
           <span class="course-item-sub">ID: ${escapeHtml(c.courseId)} · ${escapeHtml(c.teacher || "-")}</span>
@@ -830,9 +836,18 @@ $("#instance-form").addEventListener("submit", async (e) => {
 
   const checkedIds = [];
   const courseTitles = {};
+  const courseLinks = {};
   document.querySelectorAll(".course-chk:checked").forEach((el) => {
     checkedIds.push(el.value);
     courseTitles[el.value] = el.dataset.title || el.value;
+    if (el.dataset.clazzid && el.dataset.cpi) {
+      courseLinks[el.value] = {
+        clazzId: el.dataset.clazzid,
+        cpi: el.dataset.cpi,
+        title: el.dataset.title || el.value,
+        teacher: el.dataset.teacher || "",
+      };
+    }
   });
 
   const manualIds = $("#inst-manual-courses")
@@ -852,6 +867,7 @@ $("#instance-form").addEventListener("submit", async (e) => {
     cookie_session_id: activeSessionId,
     courses,
     course_titles: courseTitles,
+    course_links: courseLinks,
     api_profile_id: $("#inst-api-profile").value,
     speed,
     jobs,
@@ -1006,6 +1022,127 @@ window.openInstanceLogs = async (id, name) => {
   if (logPollTimer) clearInterval(logPollTimer);
   logPollTimer = setInterval(pullLogs, 2000);
 };
+
+// ---------------- Chaoxing Portal & Task Options ----------------
+function renderPortalModal(data) {
+  $("#portal-home-link").href = data.portal_url || "https://i.chaoxing.com/base";
+  $("#portal-redo-finished").checked = Boolean(data.redo_finished);
+  $("#portal-no-cache").checked = Boolean(data.no_cache);
+
+  const warnEl = $("#portal-warning");
+  if (data.warning) {
+    warnEl.textContent = data.warning;
+    warnEl.classList.remove("hidden");
+  } else {
+    warnEl.textContent = "";
+    warnEl.classList.add("hidden");
+  }
+
+  const courses = data.courses || [];
+  const listBox = $("#portal-course-list");
+  if (!courses.length) {
+    listBox.innerHTML = `<div class="empty-hint">该任务暂无关联课程</div>`;
+  } else {
+    listBox.innerHTML = courses
+      .map((c) => {
+        const subParts = [`ID: ${c.id}`];
+        if (c.teacher) subParts.push(c.teacher);
+        if (!c.direct) subParts.push("未缓存直达参数，点击将打开学习通首页");
+        const btnLabel = c.direct ? "进入课程后台 ↗" : "打开首页 ↗";
+        return `
+          <div class="portal-course-row">
+            <div class="portal-course-info">
+              <span class="portal-course-title">${escapeHtml(c.title || c.id)}</span>
+              <span class="portal-course-sub">${escapeHtml(subParts.join(" · "))}</span>
+            </div>
+            <a class="btn btn-tonal btn-sm" href="${escapeHtml(c.url)}" target="_blank" rel="noopener noreferrer">${btnLabel}</a>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  const failedWrap = $("#portal-failed-wrap");
+  const failedPre = $("#portal-failed-works");
+  if (data.failed_works_md && data.failed_works_md.trim()) {
+    failedPre.textContent = data.failed_works_md;
+    failedWrap.classList.remove("hidden");
+  } else {
+    failedPre.textContent = "";
+    failedWrap.classList.add("hidden");
+  }
+}
+
+window.openChaoxingPortal = async (id, name, refresh = false) => {
+  activePortalInstanceId = id;
+  $("#portal-modal-title").textContent = `学习通后台 · ${name}`;
+  $("#portal-warning").classList.add("hidden");
+  $("#portal-failed-wrap").classList.add("hidden");
+  $("#portal-course-list").innerHTML = `<div class="empty-hint">${refresh ? "正在从学习通刷新课程链接..." : "正在读取课程入口..."}</div>`;
+  $("#portal-modal").classList.remove("hidden");
+
+  const qs = refresh ? "?refresh=1" : "";
+  try {
+    const { ok, data } = await apiFetch(`/api/instances/${id}/portal${qs}`);
+    if (!ok || !data.ok) {
+      $("#portal-course-list").innerHTML = `<div class="banner banner-err">${escapeHtml(data.error || "加载失败")}</div>`;
+      return;
+    }
+    if (activePortalInstanceId !== id) return;
+    renderPortalModal(data);
+  } catch (err) {
+    $("#portal-course-list").innerHTML = `<div class="banner banner-err">加载失败：${escapeHtml(err.message)}</div>`;
+  }
+};
+
+async function savePortalOptions(restart = false) {
+  if (!activePortalInstanceId) return;
+  const id = activePortalInstanceId;
+  const payload = {
+    redo_finished: $("#portal-redo-finished").checked,
+    no_cache: $("#portal-no-cache").checked,
+  };
+  const btnOnly = $("#btn-portal-save-only");
+  const btnRestart = $("#btn-portal-save-restart");
+  btnOnly.disabled = true;
+  btnRestart.disabled = true;
+  try {
+    const { ok, data } = await apiFetch(`/api/instances/${id}/options`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    if (!ok || !data.ok) {
+      showToast(data.error || "保存设置失败", true);
+      return;
+    }
+    if (!restart) {
+      showToast("任务参数已保存（下次启动生效）");
+      return;
+    }
+    const inst = data.item || {};
+    if (inst.runtime_status === "running") {
+      await apiFetch(`/api/instances/${id}/stop`, { method: "POST" });
+    }
+    const { ok: startOk, data: startData } = await apiFetch(`/api/instances/${id}/start`, { method: "POST" });
+    if (!startOk || !startData.ok) {
+      showToast(startData.error || "启动失败", true);
+      return;
+    }
+    closeModalById("portal-modal");
+    showToast("已保存设置并启动任务");
+  } finally {
+    btnOnly.disabled = false;
+    btnRestart.disabled = false;
+  }
+}
+
+$("#btn-portal-refresh").addEventListener("click", () => {
+  if (!activePortalInstanceId) return;
+  const inst = cachedInstances.find((x) => x.id === activePortalInstanceId);
+  window.openChaoxingPortal(activePortalInstanceId, inst ? inst.name : activePortalInstanceId, true);
+});
+$("#btn-portal-save-only").addEventListener("click", () => savePortalOptions(false));
+$("#btn-portal-save-restart").addEventListener("click", () => savePortalOptions(true));
 
 // ---------------- Question Bank (Course-Partitioned SQLite) ----------------
 let activeBankCourseId = "";
