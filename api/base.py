@@ -1015,7 +1015,11 @@ class Chaoxing:
             # 添加搜题延迟 #428 - 默认0s延迟
             query_delay = self.kwargs.get("query_delay", 0)
             time.sleep(query_delay)
-            res = self.tiku.query(q)
+            res = self.tiku.query(
+                q,
+                course_id=str(_course.get("courseId", "")),
+                course_title=str(_course.get("title", "")),
+            )
             answer = ""
             if not res:
                 # 随机答题

@@ -422,6 +422,7 @@ class InstanceManager:
             **os.environ,
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
+            "CHAOXING_BANK_PATH": os.path.join(ROOT_DIR, "data", "question_bank.sqlite3"),
             "PYTHONPATH": ROOT_DIR + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""),
         }
         log_fp = open(log_path, "a", encoding="utf8")

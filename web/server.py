@@ -16,11 +16,15 @@ from api.cookies import (
     save_cookies_dict,
     use_cookies,
 )
+from api.progress import ProgressReporter  # noqa: F401
 from api.qr_login import qr_login_manager
+from api.question_bank import QuestionBankDAO
 from web.api_store import api_store
 from web.instance_manager import SafetyLimitError, instance_manager
 from web.session_store import session_store
 from web.system_monitor import get_system_overview, settings_store, system_monitor
+
+question_bank = QuestionBankDAO()
 
 
 def create_app() -> Flask:
@@ -388,6 +392,45 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 404
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
+
+    # ---------------- 按课程划分的自建题库 ----------------
+
+    @app.get("/api/bank/courses")
+    def list_bank_courses():
+        return jsonify({"items": question_bank.list_courses()})
+
+    @app.get("/api/bank/questions")
+    def list_bank_questions():
+        course_id = request.args.get("course_id", "").strip() or None
+        q = request.args.get("q", "").strip()
+        try:
+            limit = int(request.args.get("limit", 100))
+            offset = int(request.args.get("offset", 0))
+        except ValueError:
+            limit, offset = 100, 0
+        return jsonify(question_bank.list_questions(course_id=course_id, query=q, limit=limit, offset=offset))
+
+    @app.put("/api/bank/questions/<int:qid>")
+    def update_bank_question(qid: int):
+        payload = request.get_json(silent=True) or {}
+        try:
+            updated = question_bank.update_answer(qid, str(payload.get("answer") or ""))
+            if not updated:
+                return jsonify({"ok": False, "error": "未找到该题目"}), 404
+            return jsonify({"ok": True})
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/bank/questions/<int:qid>")
+    def delete_bank_question(qid: int):
+        if not question_bank.delete_question(qid):
+            return jsonify({"ok": False, "error": "未找到该题目"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/bank/courses/<course_id>")
+    def delete_bank_course(course_id: str):
+        removed = question_bank.delete_course(course_id)
+        return jsonify({"ok": True, "removed": removed})
 
     return app
 

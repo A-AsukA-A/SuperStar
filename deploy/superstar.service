@@ -1,0 +1,17 @@
+[Unit]
+Description=SuperStar Web Control Panel
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/superstar
+EnvironmentFile=-/opt/superstar/.env
+Environment=WEB_HOST=127.0.0.1
+Environment=PYTHONUTF8=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/superstar/.venv/bin/python /opt/superstar/run_web.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

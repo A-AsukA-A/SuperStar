@@ -12,13 +12,12 @@ from pathlib import Path
 from re import sub
 from typing import Optional
 
-import httpx
 import requests
-from openai import OpenAI
 from urllib3 import disable_warnings, exceptions
 
 from api.answer_check import check_answer
 from api.logger import logger
+from api.question_bank import QuestionBankDAO
 
 # 关闭警告
 disable_warnings(exceptions.InsecureRequestWarning)
@@ -27,10 +26,8 @@ __all__ = ["CacheDAO", "Tiku", "AI"]
 
 
 class CacheDAO:
-    """
-    @Author: SocialSisterYi
-    @Reference: https://github.com/SocialSisterYi/xuexiaoyi-to-xuexitong-tampermonkey-proxy
-    """
+    """保留兼容的旧 JSON 缓存类。"""
+
     DEFAULT_CACHE_FILE = "cache.json"
 
     def __init__(self, file: str = DEFAULT_CACHE_FILE):
@@ -65,9 +62,8 @@ class CacheDAO:
                         bak_name = f"{self.cache_file.name}.bak.{int(time.time())}"
                         bak_path = self.cache_file.with_name(bak_name)
                         shutil.copy2(self.cache_file, bak_path)
-                        logger.error(f"缓存文件已损坏，已备份为: {bak_path}，将使用空缓存继续运行")
-                    except Exception as ex:
-                        logger.error(f"备份损坏缓存失败: {ex}")
+                    except Exception:
+                        pass
                     return {}
         except Exception as e:
             logger.error(f"读取缓存异常: {e}")
@@ -97,8 +93,7 @@ class CacheDAO:
             logger.error(f"Failed to write cache: {e}")
 
     def get_cache(self, question: str) -> Optional[str]:
-        data = self._read_cache()
-        return data.get(question)
+        return self._read_cache().get(question)
 
     def add_cache(self, question: str, answer: str) -> None:
         with self._lock:
@@ -121,6 +116,7 @@ class Tiku:
         self._api = None
         self._conf = None
         self._token = None
+        self._bank: Optional[QuestionBankDAO] = None
 
     @property
     def name(self):
@@ -145,6 +141,11 @@ class Tiku:
     @token.setter
     def token(self, value):
         self._token = value
+
+    def _get_bank(self) -> QuestionBankDAO:
+        if self._bank is None:
+            self._bank = QuestionBankDAO()
+        return self._bank
 
     def init_tiku(self):
         if not self._conf:
@@ -183,7 +184,7 @@ class Tiku:
             self.DISABLE = True
             return None
 
-    def query(self, q_info: dict) -> Optional[str]:
+    def query(self, q_info: dict, course_id: str = "", course_title: str = "") -> Optional[str]:
         if self.DISABLE:
             return None
 
@@ -192,23 +193,30 @@ class Tiku:
         q_info["title"] = sub(r"（\d+\.\d+分）$", "", q_info["title"])
         logger.debug(f"处理后标题：{q_info['title']}")
 
+        cid = str(course_id or q_info.get("course_id") or "default").strip() or "default"
+        ctitle = str(course_title or q_info.get("course_title") or "").strip()
+        options = q_info.get("options", "")
+        qtype = q_info.get("type", "")
         use_cache = getattr(self, "USE_CACHE", True)
-        cache_dao = CacheDAO() if use_cache else None
-        cache_key = f"{q_info['title']}||{q_info.get('options', '')}||{q_info.get('type', '')}"
-        answer = cache_dao.get_cache(cache_key) if use_cache else None
-        if answer:
-            logger.info(f"从缓存中获取答案：{q_info['title']} -> {answer}")
-            return answer.strip()
+        bank = self._get_bank() if use_cache else None
 
+        # 1. 优先查询按课程划分的自建本地 SQLite 题库
+        if use_cache and bank is not None:
+            answer = bank.lookup(cid, q_info["title"], options, qtype)
+            if answer:
+                logger.info(f"命中自建题库[课程 {cid}]：{q_info['title']} -> {answer}")
+                return answer.strip()
+
+        # 2. 自建题库未命中时调用 AI API 作答，校验通过后入库
         answer = self._query(q_info)
         if answer:
             answer = answer.strip()
             logger.info(f"从{self.name}获取答案：{q_info['title']} -> {answer}")
-            if check_answer(answer, q_info["type"], self):
-                if use_cache:
-                    cache_dao.add_cache(cache_key, answer)
+            if check_answer(answer, qtype, self):
+                if use_cache and bank is not None:
+                    bank.save(cid, ctitle, q_info["title"], options, qtype, answer, source="AI")
                 else:
-                    logger.info("已启用 --no-cache，本次结果不写入缓存")
+                    logger.info("已启用 --no-cache，本次结果不写入自建题库")
                 return answer
             else:
                 logger.info(f"从{self.name}获取到的答案类型与题目类型不符，已舍弃")
@@ -221,7 +229,7 @@ class Tiku:
         pass
 
     def get_tiku_from_config(self):
-        """从配置文件加载 AI 答题实例（已移除第三方题库，仅保留 AI API）。"""
+        """从配置文件加载 AI 答题实例。"""
         if not self._conf:
             self.config_set(self._get_conf())
         if self.DISABLE or not self._conf:
@@ -273,7 +281,7 @@ class Tiku:
 
 
 class AI(Tiku):
-    """OpenAI 兼容大模型答题实现（支持 DeepSeek 与图文混合题目）"""
+    """基于 requests 直连的 OpenAI 兼容大模型答题实现（支持 DeepSeek 与图文混合题目）。"""
 
     IMG_RE = re.compile(r'<img[^>]*?src="([^"]+)"[^>]*>')
 
@@ -293,11 +301,6 @@ class AI(Tiku):
             and (self.model or "").lower().startswith("deepseek-v4")
         )
 
-    def _completion_kwargs(self, **kwargs):
-        if self._is_deepseek_v4():
-            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        return kwargs
-
     def _wait_for_interval(self):
         if self.last_request_time:
             interval_time = time.time() - self.last_request_time
@@ -308,7 +311,6 @@ class AI(Tiku):
 
     @staticmethod
     def _sniff_image_mime(raw: bytes) -> Optional[str]:
-        """按文件头判断图片格式；不是图片就返回 None"""
         if raw[:4] == b"\x89PNG":
             return "image/png"
         if raw[:3] == b"\xff\xd8\xff":
@@ -322,7 +324,6 @@ class AI(Tiku):
         return None
 
     def _image_to_data_uri(self, url: str) -> Optional[str]:
-        """下载题目图片并转成 base64 data URI，失败返回 None"""
         try:
             resp = requests.get(
                 url,
@@ -350,7 +351,6 @@ class AI(Tiku):
             return None
 
     def _build_user_content(self, text: str):
-        """把文本里的 <img> 换成 [图N] 并附图；纯文本则原样返回"""
         parts = []
         last = 0
         index = 0
@@ -372,7 +372,6 @@ class AI(Tiku):
 
     @staticmethod
     def _extract_json_answer(text: str):
-        """从模型输出里提取包含 Answer 的 JSON（允许前后有分析文字或代码块）"""
         if not text:
             return None
         cleaned = str(text).strip()
@@ -396,14 +395,51 @@ class AI(Tiku):
                 continue
         return None
 
-    def _build_client(self) -> OpenAI:
-        if self.http_proxy:
-            httpx_client = httpx.Client(proxy=self.http_proxy)
-            return OpenAI(http_client=httpx_client, base_url=self.endpoint, api_key=self.key)
-        return OpenAI(base_url=self.endpoint, api_key=self.key)
+    def _chat_completions_url(self) -> str:
+        base = self.endpoint.rstrip("/")
+        if base.endswith("/chat/completions"):
+            return base
+        return f"{base}/chat/completions"
+
+    def _post_chat_completions(
+        self,
+        messages: list[dict],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: int = 60,
+    ) -> str:
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if self._is_deepseek_v4():
+            payload["thinking"] = {"type": "disabled"}
+
+        headers = {
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": "application/json",
+        }
+        proxies = {"http": self.http_proxy, "https": self.http_proxy} if self.http_proxy else None
+        resp = requests.post(
+            self._chat_completions_url(),
+            headers=headers,
+            json=payload,
+            proxies=proxies,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:240]}")
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"响应缺少 choices: {str(data)[:200]}")
+        return str((choices[0].get("message") or {}).get("content") or "")
 
     def _query(self, q_info: dict):
-        client = self._build_client()
         options = "\n".join(q_info["options"].split("\n"))
 
         if q_info["type"] == "single":
@@ -444,21 +480,17 @@ class AI(Tiku):
         self._wait_for_interval()
         self.last_request_time = time.time()
         try:
-            completion = client.chat.completions.create(
-                **self._completion_kwargs(
-                    model=self.model,
-                    temperature=0,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                )
+            raw_content = self._post_chat_completions(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0,
             )
         except Exception as e:
             logger.error(f"大模型请求失败: {e}")
             return None
 
-        raw_content = completion.choices[0].message.content
         try:
             response = self._extract_json_answer(raw_content)
             if response is None:
@@ -489,24 +521,21 @@ class AI(Tiku):
             logger.warning("AI 题库缺少 endpoint / key / model 配置，已停用 AI 答题功能")
 
     def check_llm_connection(self) -> bool:
-        """检查大模型连接是否可用"""
+        """检查大模型连接是否可用。"""
         if self.DISABLE or not self.endpoint or not self.key or not self.model:
             logger.warning("AI 答题未配置完整的 endpoint/key/model")
             return False
 
         logger.info(f"正在检查 {self.name} 连接...")
         try:
-            client = self._build_client()
             self._wait_for_interval()
             self.last_request_time = time.time()
-            completion = client.chat.completions.create(
-                **self._completion_kwargs(
-                    model=self.model,
-                    messages=[{"role": "user", "content": "你好，请回答：1+1 等于几？只回答数字。"}],
-                    max_tokens=64,
-                )
+            content = self._post_chat_completions(
+                messages=[{"role": "user", "content": "你好，请回答：1+1 等于几？只回答数字。"}],
+                max_tokens=64,
+                timeout=30,
             )
-            if completion.choices and completion.choices[0].message.content:
+            if content:
                 logger.info(f"{self.name} 连接检查成功")
                 return True
             logger.error(f"{self.name} 连接检查失败：未收到响应")

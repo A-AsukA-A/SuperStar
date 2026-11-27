@@ -1,15 +1,43 @@
 # SuperStar
 
-基于超星学习通核心刷课引擎的单容器 Web 控制台（适配 1C1G / 1C2G 小内存服务器）。
+超星学习通轻量化控制台（低内存、按课程划分自建 SQLite 题库、支持 `systemd` 原生后台常驻与 Docker）。
 
 ## 核心功能
 
 - **扫码一体选课 & 多账号切换**：新建任务时直接展示登录二维码，扫码确认后自动消码并拉取课程，支持多账号 Cookie 独立切换与单独更新登录。
-- **预检未完成章节**：开课前自动跳过已完成章节，按真实剩余章节调度并计算初始百分比；支持倍速（`1.0~2.0`）与并发（`1~4`，默认 `4`）安全上限。
-- **AI 大模型答题**：仅保留 OpenAI 兼容接口（如 DeepSeek），支持在前端管理多条 API、连通性测试与密钥脱敏。
-- **低开销实时监控**：后台 2 秒采样 CPU / 内存并通过 SSE 实时推送任务百分比、当前课程/章节/任务点及日志，按服务器硬件自动限制并发上限。
+- **预检未完成章节**：开课前自动跳过已完成章节，仅调度未完成章节并计算初始百分比；倍速上限 `1.0~2.0`、并发上限 `1~4`（默认 `4`）。
+- **按课程划分的自建题库**：本地 SQLite（WAL 模式，亚毫秒检索）优先查库，命中则零延迟直接作答并跳过 AI 请求；未命中再调用 AI API 作答并自动按课程入库，支持在「自建题库」页查看、搜索、改答案与清理。
+- **极简低内存架构**：直连 `requests` 调用 OpenAI/DeepSeek 接口（已移除 `openai`/`httpx` SDK），字库与 `fontTools` 按需懒加载。
+- **低开销实时监控（SSE）**：后台 2 秒采样 CPU / 内存并通过 SSE 实时推送任务百分比、当前课程/章节/任务点及关键日志（默认过滤 `TRACE` 心跳，可选开启）。
 
-## 本地运行（Python 3.13+）
+## VPS 部署方案 A：宿主机 venv + systemd（最省内存，推荐 1G 以下小鸡）
+
+```bash
+git clone https://github.com/A-AsukA-A/SuperStar.git /opt/superstar
+cd /opt/superstar
+
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+cat > .env << 'EOF'
+WEB_USERNAME=july
+WEB_PASSWORD=请改成你的强密码
+WEB_PORT=5000
+EOF
+
+cp deploy/superstar.service /etc/systemd/system/superstar.service
+systemctl daemon-reload
+systemctl enable --now superstar
+```
+
+## VPS 部署方案 B：单容器 Docker 部署
+
+```bash
+export WEB_PASSWORD="你的强密码"
+docker compose up -d --build
+```
+
+## 本地运行（Windows / macOS / Linux）
 
 ```powershell
 uv venv --python 3.13 .venv
@@ -19,26 +47,6 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 
 访问 `http://127.0.0.1:5000`。
 
-## VPS 单容器后台部署
-
-整个服务仅运行 **1 个 Docker 容器**，关闭 SSH 和浏览器后任务仍在服务器后台持续执行，随时通过浏览器访问控制面板。
-
-```bash
-git clone https://github.com/A-AsukA-A/SuperStar.git /opt/superstar
-cd /opt/superstar
-
-# 公网访问建议设置密码保护
-export WEB_PASSWORD="你的强密码"
-docker compose up -d --build
-```
-
-- 控制面板端口：`5000`（可通过 `WEB_PORT` 修改）。
-- 持久化目录：`./data`（AI API 与多账号会话）和 `./instances`（各任务独立 `cookies.txt`、`config.ini` 与日志）。
-
-## 关于后续超星接口维护
-
-本项目的协议核心（[api/](file:///c:/Users/ruben/Desktop/文件/superstar/api) 与 [main.py](file:///c:/Users/ruben/Desktop/文件/superstar/main.py)）与 Web 控制台（[web/](file:///c:/Users/ruben/Desktop/文件/superstar/web)）完全解耦。若未来学习通接口调整，只需更新 `api/` 下的请求/解析文件即可，无需改动前端与调度逻辑。
-
 ## 安全说明
 
-`cookies.txt`、`config.ini`、`data/`、`instances/`、`.env`、`cache.json`、`chaoxing.log` 均已加入 `.gitignore` 与 `.dockerignore`，推送代码前请确保工作区未包含个人凭证。
+`cookies.txt`、`config.ini`、`data/`（含 API Key、多账号会话与自建题库 `question_bank.sqlite3`）、`instances/`、`.env`、`chaoxing.log` 均已加入 `.gitignore` 与 `.dockerignore`。

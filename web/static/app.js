@@ -51,6 +51,9 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
     $(`#tab-${btn.dataset.tab}`).classList.add("active");
+    if (btn.dataset.tab === "bank") {
+      loadBankCourses().then(loadBankQuestions);
+    }
   });
 });
 
@@ -888,6 +891,131 @@ window.openInstanceLogs = async (id, name) => {
   if (logPollTimer) clearInterval(logPollTimer);
   logPollTimer = setInterval(pullLogs, 2000);
 };
+
+// ---------------- Question Bank (Course-Partitioned SQLite) ----------------
+let activeBankCourseId = "";
+
+async function loadBankCourses() {
+  const { data } = await apiFetch("/api/bank/courses");
+  const courses = data.items || [];
+  const box = $("#bank-courses");
+  if (!courses.length) {
+    activeBankCourseId = "";
+    box.innerHTML = `<span class="hint-inline">暂无题库记录，AI 答题后会自动按课程入库</span>`;
+    return;
+  }
+  if (activeBankCourseId && !courses.some((c) => c.course_id === activeBankCourseId)) {
+    activeBankCourseId = "";
+  }
+  const allChip = `<span class="session-chip ${activeBankCourseId === "" ? "active" : ""}" onclick="selectBankCourse('')">全部课程</span>`;
+  const chips = courses.map((c) => {
+    const active = activeBankCourseId === c.course_id ? "active" : "";
+    return `
+      <span class="session-chip ${active}" onclick="selectBankCourse('${escapeHtml(c.course_id)}')">
+        <span>${escapeHtml(c.course_title)} (${c.question_count}题 · 命中${c.total_hits})</span>
+        <button type="button" class="session-chip-del" title="清空该课程题库" onclick="event.stopPropagation(); clearBankCourse('${escapeHtml(c.course_id)}')">&times;</button>
+      </span>
+    `;
+  });
+  box.innerHTML = allChip + chips.join("");
+}
+
+async function loadBankQuestions() {
+  const q = encodeURIComponent($("#bank-search").value.trim());
+  const cid = activeBankCourseId ? `&course_id=${encodeURIComponent(activeBankCourseId)}` : "";
+  const { data } = await apiFetch(`/api/bank/questions?limit=100${cid}&q=${q}`);
+  const items = data.items || [];
+  const total = data.total ?? items.length;
+  $("#bank-total-chip").textContent = `${total} 题`;
+
+  const box = $("#bank-questions");
+  if (!items.length) {
+    box.innerHTML = `<div class="card"><div class="empty-hint">暂无匹配的题目</div></div>`;
+    return;
+  }
+
+  const typeMap = {
+    single: "单选",
+    multiple: "多选",
+    judgement: "判断",
+    completion: "填空",
+    shortanswer: "简答",
+  };
+  box.innerHTML = items
+    .map((item) => {
+      const tLabel = typeMap[item.q_type] || item.q_type || "未知";
+      const srcLabel = item.source === "manual" ? "手动" : "AI";
+      return `
+        <div class="bank-item">
+          <div class="bank-item-head">
+            <div class="bank-stem"><span class="chip chip-info">${escapeHtml(tLabel)}</span> ${escapeHtml(item.title)}</div>
+            <div class="btn-group">
+              <span class="chip chip-neutral">${escapeHtml(item.course_title || item.course_id)}</span>
+              <span class="chip chip-neutral">${srcLabel} · 命中 ${item.hit_count}</span>
+            </div>
+          </div>
+          ${item.options ? `<div class="bank-opts">${escapeHtml(item.options)}</div>` : ""}
+          <div class="bank-ans-row">
+            <div>答案：<strong>${escapeHtml(item.answer)}</strong></div>
+            <div class="btn-group">
+              <button class="btn btn-outlined btn-sm" onclick="editBankAnswer(${item.id}, '${escapeHtml(item.answer)}')">修改答案</button>
+              <button class="btn btn-text btn-sm" onclick="deleteBankQuestion(${item.id})">删除</button>
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+window.selectBankCourse = (cid) => {
+  activeBankCourseId = cid;
+  loadBankCourses().then(loadBankQuestions);
+};
+
+window.clearBankCourse = async (cid) => {
+  if (!confirm("确认清空该课程下的全部自建题目？")) return;
+  const { ok, data } = await apiFetch(`/api/bank/courses/${encodeURIComponent(cid)}`, { method: "DELETE" });
+  if (!ok || !data.ok) {
+    showToast(data.error || "清空失败", true);
+    return;
+  }
+  showToast(`已清空 ${data.removed} 道题`);
+  loadBankCourses().then(loadBankQuestions);
+};
+
+window.editBankAnswer = async (qid, currentAns) => {
+  const nextAns = prompt("输入新答案（单选/多选填字母如 A 或 AC，判断填 正确/错误）：", currentAns);
+  if (nextAns === null) return;
+  const clean = nextAns.trim();
+  if (!clean) {
+    showToast("答案不能为空", true);
+    return;
+  }
+  const { ok, data } = await apiFetch(`/api/bank/questions/${qid}`, {
+    method: "PUT",
+    body: JSON.stringify({ answer: clean }),
+  });
+  if (!ok || !data.ok) {
+    showToast(data.error || "更新失败", true);
+    return;
+  }
+  showToast("答案已更新");
+  loadBankQuestions();
+};
+
+window.deleteBankQuestion = async (qid) => {
+  const { ok, data } = await apiFetch(`/api/bank/questions/${qid}`, { method: "DELETE" });
+  if (!ok || !data.ok) {
+    showToast(data.error || "删除失败", true);
+    return;
+  }
+  showToast("已删除题目");
+  loadBankCourses().then(loadBankQuestions);
+};
+
+$("#btn-bank-refresh").addEventListener("click", () => loadBankCourses().then(loadBankQuestions));
+$("#bank-search").addEventListener("input", loadBankQuestions);
 
 // ---------------- Init ----------------
 loadAiApis();
