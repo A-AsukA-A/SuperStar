@@ -177,6 +177,7 @@ code {
 }
 .course-mini-row {
   display: flex; align-items: center; gap: 7px; font-size: 0.8rem; color: var(--text-secondary);
+  flex-shrink: 0;
 }
 .course-mini-row.is-active { color: var(--text); font-weight: 500; }
 .course-mini-name {
@@ -201,7 +202,7 @@ code {
 }
 .active-job-row {
   background: var(--surface); border-radius: 8px; padding: 6px 8px;
-  display: flex; flex-direction: column; gap: 4px;
+  display: flex; flex-direction: column; gap: 4px; flex-shrink: 0;
 }
 .active-job-top { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; }
 .active-job-name {
@@ -381,6 +382,7 @@ code {
 .portal-course-row {
   display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
   background: var(--surface); border: 1px solid var(--border-light); border-radius: 10px; padding: 8px 12px;
+  flex-shrink: 0;
 }
 .portal-course-info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .portal-course-title { font-size: 0.88rem; font-weight: 500; color: var(--text); word-break: break-word; }
@@ -414,10 +416,14 @@ code {
   display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .portal-chapter-list {
-  display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto; padding-right: 2px;
+  display: block; max-height: 48vh; min-height: 160px; overflow-y: auto; padding-right: 4px;
 }
 .portal-unit-block {
-  background: var(--surface); border: 1px solid var(--border-light); border-radius: 12px; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border-light); border-radius: 12px;
+  overflow: hidden; margin-bottom: 8px;
+}
+.portal-unit-block:last-child {
+  margin-bottom: 0;
 }
 .portal-unit-head {
   display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -426,7 +432,7 @@ code {
 .portal-unit-head:hover { background: #e8eaed; }
 .portal-unit-title { flex: 1; min-width: 0; color: var(--text); word-break: break-word; }
 .portal-unit-body {
-  display: flex; flex-direction: column;
+  display: block;
 }
 .portal-chapter-item {
   border-top: 1px solid var(--border-light); background: var(--surface);
