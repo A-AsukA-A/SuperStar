@@ -111,32 +111,36 @@ function renderSystemOverview(data) {
   const hw = data.hardware;
   const th = data.thresholds;
   const guard = data.safety_guard;
+  const queued = Number(data.queued_tasks || 0);
 
   $("#cpu-text").textContent = `${hw.cpu_percent}%`;
   $("#cpu-bar").style.width = `${Math.min(100, hw.cpu_percent)}%`;
   $("#mem-text").textContent = `${hw.mem_percent}%`;
   $("#mem-bar").style.width = `${Math.min(100, hw.mem_percent)}%`;
-  $("#running-count-text").textContent = `${guard.running_containers} / ${th.max_containers}`;
+  $("#running-count-text").textContent =
+    queued > 0 ? `${guard.running_containers} / ${th.max_containers} (排队 ${queued})` : `${guard.running_containers} / ${th.max_containers}`;
 
   $("#hw-cpu-cores").textContent = `${hw.cpu_count_logical} 核`;
   $("#hw-cpu-limit").textContent = `${hw.cpu_percent}% / ${th.max_cpu_percent}%`;
   $("#hw-mem-detail").textContent = `${hw.mem_available_gb} / ${hw.mem_total_gb} GB`;
-  $("#hw-cfg-max").textContent = `${guard.running_containers} / ${th.max_containers}`;
+  $("#hw-cfg-max").textContent =
+    queued > 0 ? `${guard.running_containers} / ${th.max_containers} · 排队 ${queued}` : `${guard.running_containers} / ${th.max_containers}`;
 
   const badge = $("#safety-guard-badge");
   if (guard.allowed) {
     badge.className = "chip chip-ok";
     badge.textContent = "安全阈值正常";
   } else {
-    badge.className = "chip chip-danger";
-    badge.textContent = guard.reasons.join("；");
+    badge.className = "chip chip-warn";
+    badge.textContent = `已达阈值（新任务自动排队）· ${guard.reasons.join("；")}`;
   }
 }
 
-function statusChipHtml(status) {
+function statusChipHtml(status, queuePos = null) {
   const map = {
     running: ["运行中", "chip-info"],
     starting: ["启动中", "chip-info"],
+    queued: [queuePos ? `排队中 #${queuePos}` : "排队中", "chip-warn"],
     completed: ["已完成", "chip-ok"],
     stopped: ["已停止", "chip-warn"],
     exited: ["已退出", "chip-warn"],
@@ -167,6 +171,7 @@ function renderInstances(items) {
       const prog = inst.progress || {};
       const pct = Number(prog.overall_percent ?? 0);
       const isRunning = inst.runtime_status === "running";
+      const isQueued = inst.runtime_status === "queued";
       const pidLabel = inst.pid ? `PID ${inst.pid}` : `ID ${inst.id}`;
 
       const curCourse = prog.current_course
@@ -305,7 +310,7 @@ function renderInstances(items) {
             <div>
               <div class="inst-title">
                 <span>${escapeHtml(inst.name)}</span>
-                ${statusChipHtml(inst.runtime_status)}
+                ${statusChipHtml(inst.runtime_status, inst.queue_position)}
               </div>
               <div class="inst-sub"><code>${escapeHtml(pidLabel)}</code></div>
             </div>
@@ -339,7 +344,9 @@ function renderInstances(items) {
             ${
               isRunning
                 ? `<button class="btn btn-danger btn-sm" onclick="stopInstance('${inst.id}')">停止</button>`
-                : `<button class="btn btn-primary btn-sm" onclick="startInstance('${inst.id}')">启动</button>`
+                : isQueued
+                  ? `<button class="btn btn-outlined btn-sm" onclick="stopInstance('${inst.id}')">取消排队</button>`
+                  : `<button class="btn btn-primary btn-sm" onclick="startInstance('${inst.id}')">启动</button>`
             }
             <button class="btn btn-tonal btn-sm" onclick="openChaoxingPortal('${inst.id}', '${escapeHtml(inst.name)}')">学习通后台</button>
             <button class="btn btn-outlined btn-sm" onclick="openReauthModal('${inst.id}', '${escapeHtml(inst.name)}')">登录</button>
@@ -969,7 +976,12 @@ $("#instance-form").addEventListener("submit", async (e) => {
       return;
     }
     closeModalById("instance-modal");
-    showToast("任务已创建");
+    if (data.item && data.item.runtime_status === "queued") {
+      const pos = data.item.queue_position ? `（第 ${data.item.queue_position} 位）` : "";
+      showToast(`已达安全阈值，任务已加入自动排队队列${pos}`);
+    } else {
+      showToast("任务已创建");
+    }
   } finally {
     btn.disabled = false;
   }
@@ -1043,7 +1055,12 @@ window.startInstance = async (id) => {
     showToast(data.error || "启动失败", true);
     return;
   }
-  showToast("已启动");
+  if (data.item && data.item.runtime_status === "queued") {
+    const pos = data.item.queue_position ? `（第 ${data.item.queue_position} 位）` : "";
+    showToast(`超过安全阈值，已加入自动排队队列${pos}`);
+  } else {
+    showToast("已启动");
+  }
 };
 
 window.stopInstance = async (id) => {

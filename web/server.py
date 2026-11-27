@@ -35,6 +35,7 @@ def create_app() -> Flask:
     )
     asset_version = str(int(time.time()))
     system_monitor.ensure_started()
+    instance_manager.ensure_scheduler_started()
 
     @app.before_request
     def _require_web_password():
@@ -68,15 +69,20 @@ def create_app() -> Flask:
     @app.get("/api/system/overview")
     def system_overview():
         running = instance_manager.count_running()
-        return jsonify(get_system_overview(running_containers=running))
+        overview = get_system_overview(running_containers=running)
+        overview["queued_tasks"] = instance_manager.count_queued()
+        return jsonify(overview)
 
     @app.put("/api/system/thresholds")
     def update_thresholds():
         payload = request.get_json(silent=True) or {}
         try:
             updated = settings_store.update_thresholds(payload)
+            instance_manager.dispatch_queued_instances()
             running = instance_manager.count_running()
-            return jsonify({"ok": True, "thresholds": updated, "overview": get_system_overview(running)})
+            overview = get_system_overview(running_containers=running)
+            overview["queued_tasks"] = instance_manager.count_queued()
+            return jsonify({"ok": True, "thresholds": updated, "overview": overview})
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
@@ -86,8 +92,11 @@ def create_app() -> Flask:
             while True:
                 instances = instance_manager.list_instances()
                 running = sum(1 for item in instances if item.get("runtime_status") == "running")
+                queued = sum(1 for item in instances if item.get("runtime_status") == "queued")
+                overview = get_system_overview(running_containers=running)
+                overview["queued_tasks"] = queued
                 payload = {
-                    "overview": get_system_overview(running_containers=running),
+                    "overview": overview,
                     "instances": instances,
                 }
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"

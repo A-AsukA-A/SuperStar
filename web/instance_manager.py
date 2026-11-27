@@ -157,7 +157,26 @@ class InstanceManager:
         self._local_procs: dict[str, subprocess.Popen] = {}
         self._local_ps: dict[str, psutil.Process] = {}
         self._remedy_procs: dict[str, subprocess.Popen] = {}
+        self._scheduler_started = False
         os.makedirs(self.instances_dir, exist_ok=True)
+
+    def ensure_scheduler_started(self) -> None:
+        if self._scheduler_started:
+            return
+        with self._lock:
+            if self._scheduler_started:
+                return
+            self._scheduler_started = True
+            t = threading.Thread(target=self._scheduler_loop, name="instance-queue", daemon=True)
+            t.start()
+
+    def _scheduler_loop(self) -> None:
+        while True:
+            time.sleep(3.0)
+            try:
+                self.dispatch_queued_instances()
+            except Exception:
+                pass
 
     def _inst_dir(self, instance_id: str) -> str:
         if not re.fullmatch(r"[A-Za-z0-9_-]{4,32}", instance_id or ""):
@@ -239,8 +258,25 @@ class InstanceManager:
                 pass
         return False
 
+    def _count_running_unlocked(self) -> int:
+        if not os.path.isdir(self.instances_dir):
+            return 0
+        total = 0
+        for name in os.listdir(self.instances_dir):
+            inst_dir = os.path.join(self.instances_dir, name)
+            if not os.path.isdir(inst_dir):
+                continue
+            meta = _read_json(os.path.join(inst_dir, "meta.json"))
+            if meta and self._is_proc_running(meta.get("id", name), meta):
+                total += 1
+        return total
+
     def count_running(self) -> int:
-        return sum(1 for item in self.list_instances() if item["runtime_status"] == "running")
+        with self._lock:
+            return self._count_running_unlocked()
+
+    def count_queued(self) -> int:
+        return sum(1 for item in self.list_instances() if item["runtime_status"] == "queued")
 
     def list_instances(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -256,6 +292,19 @@ class InstanceManager:
                     continue
                 items.append(self._build_status_view(inst_dir, meta))
 
+            queued_items = [x for x in items if x.get("runtime_status") == "queued"]
+            queued_items.sort(
+                key=lambda x: (
+                    int(x.get("queued_at") or 0),
+                    int(x.get("created_at") or 0),
+                    str(x.get("id") or ""),
+                )
+            )
+            for pos, q_item in enumerate(queued_items, 1):
+                q_item["queue_position"] = pos
+                reason = q_item.get("queue_reason") or "等待安全阈值空闲"
+                q_item["progress"]["message"] = f"排队等待中（第 {pos} 位）· {reason}"
+
             items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
             return items
 
@@ -264,6 +313,8 @@ class InstanceManager:
         meta = _read_json(os.path.join(inst_dir, "meta.json"))
         if not meta:
             return None
+        if meta.get("queued") and not self._is_proc_running(instance_id, meta):
+            return next((x for x in self.list_instances() if x["id"] == instance_id), None)
         return self._build_status_view(inst_dir, meta)
 
     def _build_status_view(self, inst_dir: str, meta: dict[str, Any]) -> dict[str, Any]:
@@ -298,10 +349,17 @@ class InstanceManager:
                 except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
                     pass
         else:
-            p_status = progress.get("status")
-            runtime_status = p_status if p_status in ("completed", "error", "stopped") else "stopped"
+            if meta.get("queued"):
+                runtime_status = "queued"
+            else:
+                p_status = progress.get("status")
+                runtime_status = p_status if p_status in ("completed", "error", "stopped") else "stopped"
 
-        if runtime_status != "running" and progress.get("status") in ("starting", "running"):
+        if runtime_status == "queued":
+            progress["status"] = "queued"
+            reason = str(meta.get("queue_reason") or "等待安全阈值空闲")
+            progress["message"] = f"排队等待中 · {reason}"
+        elif runtime_status != "running" and progress.get("status") in ("starting", "running"):
             progress["status"] = runtime_status
             if runtime_status == "stopped":
                 progress["message"] = "任务已停止"
@@ -351,17 +409,16 @@ class InstanceManager:
             "no_cache": bool(meta.get("no_cache", False)),
             "api_profile_id": meta.get("api_profile_id"),
             "api_profile_name": meta.get("api_profile_name") or "仅刷视频",
+            "queued": runtime_status == "queued",
+            "queued_at": meta.get("queued_at"),
+            "queue_reason": meta.get("queue_reason") or "",
+            "queue_position": None,
             "progress": progress,
             "created_at": meta.get("created_at", 0),
         }
 
     def create_instance(self, payload: dict[str, Any], auto_start: bool = True) -> dict[str, Any]:
         with self._lock:
-            if auto_start:
-                guard = check_safety_guard(running_containers=self.count_running())
-                if not guard["allowed"]:
-                    raise SafetyLimitError(guard["reasons"])
-
             name = str(payload.get("name") or "").strip() or f"task-{uuid.uuid4().hex[:4]}"
             courses_raw = payload.get("courses") or []
             if isinstance(courses_raw, str):
@@ -468,22 +525,87 @@ class InstanceManager:
     def start_instance(self, instance_id: str) -> dict[str, Any]:
         with self._lock:
             inst_dir = self._inst_dir(instance_id)
-            meta = _read_json(os.path.join(inst_dir, "meta.json"))
+            meta_path = os.path.join(inst_dir, "meta.json")
+            meta = _read_json(meta_path)
             if not meta:
                 raise KeyError("未找到指定任务")
 
-            current = self.get_instance(instance_id)
-            if current and current["runtime_status"] == "running":
-                return current
+            if self._is_proc_running(instance_id, meta):
+                return self._build_status_view(inst_dir, meta)
 
-            guard = check_safety_guard(running_containers=self.count_running())
+            guard = check_safety_guard(running_containers=self._count_running_unlocked())
             if not guard["allowed"]:
-                raise SafetyLimitError(guard["reasons"])
+                meta["queued"] = True
+                if not meta.get("queued_at"):
+                    meta["queued_at"] = int(time.time())
+                meta["queue_reason"] = "；".join(guard["reasons"])
+                _atomic_write_json(meta_path, meta)
+                return self.get_instance(instance_id)  # type: ignore[return-value]
 
+            meta.pop("queued", None)
+            meta.pop("queued_at", None)
+            meta.pop("queue_reason", None)
             proc = self._start_process(inst_dir, meta)
             meta["pid"] = proc.pid
-            _atomic_write_json(os.path.join(inst_dir, "meta.json"), meta)
-            return self.get_instance(instance_id)  # type: ignore[return-value]
+            _atomic_write_json(meta_path, meta)
+            return self._build_status_view(inst_dir, meta)
+
+    def dispatch_queued_instances(self) -> list[str]:
+        """当安全阈值有空位且资源满足条件时，按 FIFO 顺序自动启动队首任务（每次最多启动 1 个以防并发内存尖峰）。"""
+        started_ids: list[str] = []
+        with self._lock:
+            if not os.path.isdir(self.instances_dir):
+                return started_ids
+
+            candidates: list[tuple[int, int, str, str, str, dict[str, Any]]] = []
+            for name in os.listdir(self.instances_dir):
+                inst_dir = os.path.join(self.instances_dir, name)
+                if not os.path.isdir(inst_dir):
+                    continue
+                meta_path = os.path.join(inst_dir, "meta.json")
+                meta = _read_json(meta_path)
+                if not meta or not meta.get("queued"):
+                    continue
+                inst_id = str(meta.get("id") or name)
+                if self._is_proc_running(inst_id, meta):
+                    meta.pop("queued", None)
+                    meta.pop("queued_at", None)
+                    meta.pop("queue_reason", None)
+                    _atomic_write_json(meta_path, meta)
+                    continue
+                candidates.append(
+                    (
+                        int(meta.get("queued_at") or 0),
+                        int(meta.get("created_at") or 0),
+                        inst_id,
+                        inst_dir,
+                        meta_path,
+                        meta,
+                    )
+                )
+
+            if not candidates:
+                return started_ids
+
+            candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+            guard = check_safety_guard(running_containers=self._count_running_unlocked())
+            if not guard["allowed"]:
+                reason = "；".join(guard["reasons"])
+                for _, _, _, _, m_path, m in candidates:
+                    if m.get("queue_reason") != reason:
+                        m["queue_reason"] = reason
+                        _atomic_write_json(m_path, m)
+                return started_ids
+
+            _, _, inst_id, inst_dir, meta_path, meta = candidates[0]
+            meta.pop("queued", None)
+            meta.pop("queued_at", None)
+            meta.pop("queue_reason", None)
+            proc = self._start_process(inst_dir, meta)
+            meta["pid"] = proc.pid
+            _atomic_write_json(meta_path, meta)
+            started_ids.append(inst_id)
+            return started_ids
 
     def _start_process(self, inst_dir: str, meta: dict[str, Any]) -> subprocess.Popen:
         cfg_path = os.path.join(inst_dir, "config.ini")
@@ -539,9 +661,16 @@ class InstanceManager:
     def stop_instance(self, instance_id: str) -> dict[str, Any]:
         with self._lock:
             inst_dir = self._inst_dir(instance_id)
-            meta = _read_json(os.path.join(inst_dir, "meta.json"))
+            meta_path = os.path.join(inst_dir, "meta.json")
+            meta = _read_json(meta_path)
             if not meta:
                 raise KeyError("未找到指定任务")
+
+            was_queued = bool(meta.pop("queued", False))
+            meta.pop("queued_at", None)
+            meta.pop("queue_reason", None)
+            if was_queued:
+                _atomic_write_json(meta_path, meta)
 
             pid = meta.get("pid")
             if pid:
@@ -567,7 +696,9 @@ class InstanceManager:
                 prog["updated_at"] = int(time.time())
                 _atomic_write_json(prog_path, prog)
 
-            return self.get_instance(instance_id)  # type: ignore[return-value]
+            result = self._build_status_view(inst_dir, meta)
+        self.dispatch_queued_instances()
+        return result
 
     def delete_instance(self, instance_id: str) -> None:
         with self._lock:
