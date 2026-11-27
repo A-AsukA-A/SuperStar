@@ -110,7 +110,10 @@
           <div id="inst-auth-summary" class="banner banner-ok hidden">
             <div class="auth-summary-row">
               <span id="inst-auth-summary-text">✓ 已登录</span>
-              <button type="button" id="btn-inst-switch-qr" class="btn btn-text btn-sm">切换 / 重新扫码</button>
+              <div class="btn-group">
+                <button type="button" id="btn-inst-edit-label" class="btn btn-text btn-sm">修改备注</button>
+                <button type="button" id="btn-inst-switch-qr" class="btn btn-text btn-sm">切换 / 重新扫码</button>
+              </div>
             </div>
           </div>
 
@@ -120,6 +123,7 @@
               <div id="inst-qr-placeholder" class="qr-placeholder">获取中...</div>
             </div>
             <div class="qr-inline-info">
+              <input type="text" id="inst-qr-label" placeholder="必填：账户备注（如：张三 / 小号1）" />
               <div id="inst-qr-status" class="banner banner-warn">使用学习通 App 扫码</div>
               <button type="button" id="btn-inst-qr-refresh" class="btn btn-outlined btn-sm" style="align-self: flex-start;">刷新</button>
             </div>
@@ -127,7 +131,7 @@
 
           <div id="inst-paste-panel" class="paste-panel hidden">
             <div class="form-row-2">
-              <input type="text" id="inst-paste-label" placeholder="备注名（选填）" />
+              <input type="text" id="inst-paste-label" placeholder="必填：账户备注（如：张三 / 小号1）" />
               <button type="button" id="btn-inst-paste-save" class="btn btn-primary btn-sm">保存并加载课程</button>
             </div>
             <textarea id="inst-paste-cookie" rows="2" placeholder="粘贴完整 Cookie，如: _uid=...; vc3=...; fid=..."></textarea>
@@ -149,7 +153,7 @@
             <div class="empty-hint">请先扫码或选择账号</div>
           </div>
           <label>手动补充课程 ID <small class="hint-inline">(英文逗号或换行分隔)</small>
-            <textarea id="inst-manual-courses" rows="2" placeholder="268741619, 246831735"></textarea>
+            <textarea id="inst-manual-courses" rows="2"></textarea>
           </label>
         </div>
 

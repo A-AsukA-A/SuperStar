@@ -555,6 +555,24 @@ $("#api-form").addEventListener("submit", async (e) => {
 });
 
 // ---------------- Multi-Cookie Session + Unified QR + Course Picker ----------------
+function hasSessionRemark(s) {
+  if (!s) return false;
+  if (typeof s.has_custom_label === "boolean") return s.has_custom_label;
+  const defaultUid = s.uid ? `UID ${s.uid}` : s.id;
+  return Boolean((s.label && s.label !== defaultUid) || s.nickname);
+}
+
+function formatSessionDisplay(s) {
+  if (!s) return "";
+  const uid = s.uid || s.id;
+  const defaultUid = s.uid ? `UID ${s.uid}` : s.id;
+  const remark = s.label && s.label !== defaultUid ? s.label : s.nickname || "";
+  if (remark) {
+    return `${remark} (UID ${uid})`;
+  }
+  return defaultUid;
+}
+
 function renderSessionChips() {
   const box = $("#session-chips");
   if (!cachedSessions.length) {
@@ -564,16 +582,46 @@ function renderSessionChips() {
   box.innerHTML = cachedSessions
     .map((s) => {
       const isActive = s.id === activeSessionId;
-      const text = s.nickname ? `${s.nickname} (${s.uid || s.id})` : s.label || s.id;
+      const text = formatSessionDisplay(s);
       return `
-        <span class="session-chip ${isActive ? "active" : ""}" onclick="selectSavedSession('${s.id}')">
+        <span class="session-chip ${isActive ? "active" : ""}" onclick="selectSavedSession('${escapeHtml(s.id)}')">
           <span>${escapeHtml(text)}</span>
-          <button type="button" class="session-chip-del" title="删除会话" onclick="event.stopPropagation(); removeSavedSession('${s.id}')">&times;</button>
+          <button type="button" class="session-chip-edit" title="修改备注" onclick="event.stopPropagation(); editSessionLabel('${escapeHtml(s.id)}')">&#9998;</button>
+          <button type="button" class="session-chip-del" title="删除会话" onclick="event.stopPropagation(); removeSavedSession('${escapeHtml(s.id)}')">&times;</button>
         </span>
       `;
     })
     .join("");
 }
+
+window.editSessionLabel = async (sessionId, promptText = null) => {
+  const sess = cachedSessions.find((s) => s.id === sessionId);
+  const uid = (sess && (sess.uid || sess.id)) || sessionId;
+  const defaultUid = sess && sess.uid ? `UID ${sess.uid}` : sessionId;
+  const current = sess && sess.label && sess.label !== defaultUid ? sess.label : (sess && sess.nickname) || "";
+  const input = prompt(promptText || `为账户 UID ${uid} 设置备注（必填，如：张三 / 小号1）：`, current);
+  if (input === null) return false;
+  const label = input.trim();
+  if (!label) {
+    showToast("账户备注不能为空", true);
+    return false;
+  }
+  const { ok, data } = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ label }),
+  });
+  if (!ok || !data.ok) {
+    showToast(data.error || "更新备注失败", true);
+    return false;
+  }
+  await refreshSessionsList();
+  const updated = cachedSessions.find((s) => s.id === sessionId) || data.session;
+  if (activeSessionId === sessionId && updated) {
+    showLoggedInSummary(updated);
+  }
+  showToast("账户备注已保存");
+  return true;
+};
 
 async function refreshSessionsList() {
   const { data } = await apiFetch("/api/sessions");
@@ -589,8 +637,7 @@ function showLoggedInSummary(session) {
   $("#inst-qr-panel").classList.add("hidden");
   $("#inst-paste-panel").classList.add("hidden");
 
-  const label = session.nickname ? `${session.nickname} (UID: ${session.uid || session.id})` : session.label || session.id;
-  $("#inst-auth-summary-text").textContent = `✓ ${label}`;
+  $("#inst-auth-summary-text").textContent = `✓ ${formatSessionDisplay(session)}`;
   $("#inst-auth-summary").classList.remove("hidden");
 }
 
@@ -633,7 +680,9 @@ async function startInstanceQrLogin() {
   qrPollTimer = setInterval(async () => {
     if (!currentQrSessionId) return;
     try {
-      const { data: poll } = await apiFetch(`/api/auth/qr/poll/${currentQrSessionId}`);
+      const qrLabel = ($("#inst-qr-label").value || "").trim();
+      const labelQs = qrLabel ? `?label=${encodeURIComponent(qrLabel)}` : "";
+      const { data: poll } = await apiFetch(`/api/auth/qr/poll/${currentQrSessionId}${labelQs}`);
       if (poll.status === "waiting") {
         setInstQrStatus(poll.msg || "等待扫码...", "warn");
       } else if (poll.status === "scanned") {
@@ -641,13 +690,18 @@ async function startInstanceQrLogin() {
         setInstQrStatus(`已扫码${who}，请在手机确认`, "warn");
       } else if (poll.status === "confirmed") {
         stopInstanceQrPolling();
+        $("#inst-qr-label").value = "";
         await refreshSessionsList();
         const saved = poll.saved_session || (cachedSessions.length ? cachedSessions[0] : null);
         if (saved) {
           activeSessionId = saved.id;
           renderSessionChips();
           showLoggedInSummary(saved);
-          showToast("登录成功，正在加载课程");
+          if (!hasSessionRemark(saved)) {
+            await window.editSessionLabel(saved.id, `扫码成功 (UID ${saved.uid || saved.id})，请添加账户备注（必填）：`);
+          } else {
+            showToast("登录成功，正在加载课程");
+          }
           fetchCoursesForActiveSession();
         } else {
           $("#inst-qr-panel").classList.add("hidden");
@@ -694,6 +748,9 @@ window.removeSavedSession = async (sessionId) => {
 
 $("#btn-inst-qr-new").addEventListener("click", showQrLoginPanel);
 $("#btn-inst-switch-qr").addEventListener("click", showQrLoginPanel);
+$("#btn-inst-edit-label").addEventListener("click", () => {
+  if (activeSessionId) window.editSessionLabel(activeSessionId);
+});
 $("#btn-inst-qr-refresh").addEventListener("click", startInstanceQrLogin);
 
 $("#btn-inst-paste-toggle").addEventListener("click", () => {
@@ -705,6 +762,11 @@ $("#btn-inst-paste-toggle").addEventListener("click", () => {
 $("#btn-inst-paste-save").addEventListener("click", async () => {
   const cookie = $("#inst-paste-cookie").value.trim();
   const label = $("#inst-paste-label").value.trim();
+  if (!label) {
+    showToast("请先填写账户备注（必填）", true);
+    $("#inst-paste-label").focus();
+    return;
+  }
   if (!cookie) {
     showToast("请粘贴 Cookie", true);
     return;
@@ -798,6 +860,7 @@ $("#btn-courses-none").addEventListener("click", () => {
 $("#btn-new-instance").addEventListener("click", async () => {
   $("#inst-name").value = `task-${cachedInstances.length + 1}`;
   $("#inst-manual-courses").value = "";
+  $("#inst-qr-label").value = "";
   $("#course-search").value = "";
   $("#inst-paste-panel").classList.add("hidden");
   cachedCourses = [];
@@ -827,6 +890,15 @@ $("#instance-form").addEventListener("submit", async (e) => {
   if (!activeSessionId) {
     showToast("请先登录账号", true);
     return;
+  }
+
+  const curSess = cachedSessions.find((s) => s.id === activeSessionId);
+  if (curSess && !hasSessionRemark(curSess)) {
+    const savedRemark = await window.editSessionLabel(
+      curSess.id,
+      `账户 UID ${curSess.uid || curSess.id} 尚未添加备注，请先添加备注后再创建任务：`
+    );
+    if (!savedRemark) return;
   }
 
   const speed = Number($("#inst-speed").value);

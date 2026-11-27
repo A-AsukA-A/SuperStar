@@ -112,7 +112,9 @@ def create_app() -> Flask:
     def import_session():
         payload = request.get_json(silent=True) or {}
         raw = str(payload.get("cookie") or "").strip()
-        label = str(payload.get("label") or "").strip() or None
+        label = str(payload.get("label") or "").strip()
+        if not label:
+            return jsonify({"ok": False, "error": "请填写账户备注名"}), 400
         cookies = parse_cookie_string(raw)
         if not cookies:
             return jsonify({"ok": False, "error": "Cookie 格式无效，应为 key=value; ..."}), 400
@@ -126,6 +128,18 @@ def create_app() -> Flask:
                 "msg": validation["msg"],
             }
         )
+
+    @app.put("/api/sessions/<session_id>")
+    def update_session_label(session_id: str):
+        payload = request.get_json(silent=True) or {}
+        label = str(payload.get("label") or "").strip()
+        try:
+            meta = session_store.update_session_label(session_id, label)
+            return jsonify({"ok": True, "session": meta})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.delete("/api/sessions/<session_id>")
     def delete_session(session_id: str):
@@ -167,6 +181,7 @@ def create_app() -> Flask:
     @app.get("/api/auth/qr/poll/<session_id>")
     def auth_qr_poll(session_id: str):
         instance_id = request.args.get("instance_id", "").strip()
+        label = request.args.get("label", "").strip() or None
         result = qr_login_manager.poll_qr_session(session_id, return_cookies=True)
         if result.get("status") == "confirmed":
             cookies = result.pop("cookies", {})
@@ -175,6 +190,7 @@ def create_app() -> Flask:
                     cookies,
                     uid=result.get("uid"),
                     nickname=result.get("nickname"),
+                    label=label,
                 )
                 result["saved_session"] = saved_meta
                 if instance_id:

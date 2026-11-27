@@ -77,18 +77,58 @@ class SessionStore:
         cookie_path = os.path.join(s_dir, "cookies.txt")
         save_cookies_dict(cookies, path=cookie_path)
 
-        display_label = str(label or nickname or (f"UID {clean_uid}" if clean_uid else session_id)).strip()
-        meta: dict[str, Any] = {
-            "id": session_id,
-            "uid": clean_uid or None,
-            "nickname": str(nickname or "").strip() or None,
-            "label": display_label,
-            "cookie_count": len(cookies),
-            "updated_at": int(time.time()),
-        }
         with self._lock:
-            self._atomic_write_json(os.path.join(s_dir, "meta.json"), meta)
+            meta_path = os.path.join(s_dir, "meta.json")
+            existing = self._read_json(meta_path) or {}
+            default_uid_label = f"UID {clean_uid}" if clean_uid else session_id
+            clean_label = str(label or "").strip()
+            clean_nick = str(nickname or existing.get("nickname") or "").strip() or None
+
+            if clean_label:
+                display_label = clean_label
+                has_custom_label = clean_label != default_uid_label
+            elif existing.get("has_custom_label") or (
+                existing.get("label") and str(existing.get("label")).strip() != default_uid_label
+            ):
+                display_label = str(existing["label"]).strip()
+                has_custom_label = True
+            elif clean_nick and clean_nick != default_uid_label:
+                display_label = clean_nick
+                has_custom_label = True
+            else:
+                display_label = default_uid_label
+                has_custom_label = False
+
+            meta: dict[str, Any] = {
+                "id": session_id,
+                "uid": clean_uid or None,
+                "nickname": clean_nick,
+                "label": display_label,
+                "has_custom_label": has_custom_label,
+                "cookie_count": len(cookies),
+                "updated_at": int(time.time()),
+            }
+            self._atomic_write_json(meta_path, meta)
         return dict(meta)
+
+    def update_session_label(self, session_id: str, label: str) -> dict[str, Any]:
+        clean_label = str(label or "").strip()
+        if not clean_label:
+            raise ValueError("账户备注不能为空")
+        if len(clean_label) > 40:
+            raise ValueError("账户备注长度不能超过 40 个字符")
+
+        with self._lock:
+            s_dir = self._session_dir(session_id)
+            meta_path = os.path.join(s_dir, "meta.json")
+            meta = self._read_json(meta_path)
+            if not meta:
+                raise KeyError("未找到该账号会话")
+            meta["label"] = clean_label
+            meta["has_custom_label"] = True
+            meta["updated_at"] = int(time.time())
+            self._atomic_write_json(meta_path, meta)
+            return dict(meta)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         with self._lock:
