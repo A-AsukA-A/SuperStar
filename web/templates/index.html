@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SuperStar</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">S</div>
+      <span class="brand-name">SuperStar</span>
+      <span id="sse-badge" class="chip chip-warn">连接中</span>
+    </div>
+
+    <div class="system-strip">
+      <div class="metric-pill">
+        <span class="metric-label">CPU</span>
+        <div class="mini-bar"><div id="cpu-bar" class="mini-bar-fill"></div></div>
+        <strong id="cpu-text">--%</strong>
+      </div>
+      <div class="metric-pill">
+        <span class="metric-label">内存</span>
+        <div class="mini-bar"><div id="mem-bar" class="mini-bar-fill"></div></div>
+        <strong id="mem-text">--%</strong>
+      </div>
+      <div class="metric-pill">
+        <span class="metric-label">任务</span>
+        <strong id="running-count-text">0 / --</strong>
+      </div>
+      <button id="btn-open-thresholds" class="btn btn-tonal btn-sm">安全阈值</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="instances">任务监控</button>
+    <button class="tab-btn" data-tab="ai-api">AI API</button>
+  </nav>
+
+  <main class="container">
+    <!-- Tab 1: 任务监控 -->
+    <section id="tab-instances" class="tab-panel active">
+      <div class="toolbar">
+        <div class="overview-pills">
+          <div class="stat-pill"><span>处理器</span><strong id="hw-cpu-cores">--</strong></div>
+          <div class="stat-pill"><span>CPU / 阈值</span><strong id="hw-cpu-limit">--</strong></div>
+          <div class="stat-pill"><span>可用内存</span><strong id="hw-mem-detail">--</strong></div>
+          <div class="stat-pill"><span>并发 / 上限</span><strong id="hw-cfg-max">--</strong></div>
+          <span id="safety-guard-badge" class="chip chip-ok">运行正常</span>
+        </div>
+        <div class="btn-group">
+          <button id="btn-clear-completed" class="btn btn-outlined" disabled>清理已完成</button>
+          <button id="btn-new-instance" class="btn btn-primary">+ 新建任务</button>
+        </div>
+      </div>
+
+      <div id="instance-list" class="instance-grid"></div>
+    </section>
+
+    <!-- Tab 2: AI API -->
+    <section id="tab-ai-api" class="tab-panel">
+      <div class="toolbar">
+        <span class="section-title">OpenAI 兼容答题接口</span>
+        <button id="btn-add-api" class="btn btn-primary">+ 添加 API</button>
+      </div>
+      <div id="api-list" class="api-grid"></div>
+    </section>
+  </main>
+
+  <!-- 新建任务弹窗 -->
+  <div id="instance-modal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="instance-modal"></div>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-head">
+        <h3>新建刷课任务</h3>
+        <button class="icon-btn" data-close-modal="instance-modal">&times;</button>
+      </div>
+      <form id="instance-form" class="form-grid">
+        <label>任务名称
+          <input type="text" id="inst-name" required placeholder="例如：worker-1" />
+        </label>
+
+        <!-- 账号会话 / 扫码登录 -->
+        <div class="surface-box">
+          <div class="box-head">
+            <span>账号会话</span>
+            <div class="btn-group">
+              <button type="button" id="btn-inst-qr-new" class="btn btn-tonal btn-sm">扫码新账号</button>
+              <button type="button" id="btn-inst-paste-toggle" class="btn btn-text btn-sm">粘贴 Cookie</button>
+            </div>
+          </div>
+
+          <div id="session-chips" class="session-chips"></div>
+
+          <div id="inst-auth-summary" class="banner banner-ok hidden">
+            <div class="auth-summary-row">
+              <span id="inst-auth-summary-text">✓ 已登录</span>
+              <button type="button" id="btn-inst-switch-qr" class="btn btn-text btn-sm">切换 / 重新扫码</button>
+            </div>
+          </div>
+
+          <div id="inst-qr-panel" class="qr-inline-panel hidden">
+            <div class="qr-inline-box">
+              <img id="inst-qr-img" class="qr-img-sm hidden" alt="登录二维码" />
+              <div id="inst-qr-placeholder" class="qr-placeholder">获取中...</div>
+            </div>
+            <div class="qr-inline-info">
+              <div id="inst-qr-status" class="banner banner-warn">使用学习通 App 扫码</div>
+              <button type="button" id="btn-inst-qr-refresh" class="btn btn-outlined btn-sm" style="align-self: flex-start;">刷新</button>
+            </div>
+          </div>
+
+          <div id="inst-paste-panel" class="paste-panel hidden">
+            <div class="form-row-2">
+              <input type="text" id="inst-paste-label" placeholder="备注名（选填）" />
+              <button type="button" id="btn-inst-paste-save" class="btn btn-primary btn-sm">保存并加载课程</button>
+            </div>
+            <textarea id="inst-paste-cookie" rows="2" placeholder="粘贴完整 Cookie，如: _uid=...; vc3=...; fid=..."></textarea>
+          </div>
+        </div>
+
+        <!-- 课程选择 -->
+        <div class="surface-box">
+          <div class="box-head">
+            <span>选择课程</span>
+            <div class="btn-group">
+              <button type="button" id="btn-fetch-courses" class="btn btn-text btn-sm">刷新列表</button>
+              <button type="button" id="btn-courses-all" class="btn btn-text btn-sm">全选</button>
+              <button type="button" id="btn-courses-none" class="btn btn-text btn-sm">清空</button>
+            </div>
+          </div>
+          <input type="text" id="course-search" placeholder="搜索课程名 / 教师 / ID..." />
+          <div id="course-list-box" class="course-list-box">
+            <div class="empty-hint">请先扫码或选择账号</div>
+          </div>
+          <label>手动补充课程 ID <small class="hint-inline">(英文逗号或换行分隔)</small>
+            <textarea id="inst-manual-courses" rows="2" placeholder="268741619, 246831735"></textarea>
+          </label>
+        </div>
+
+        <label>答题 AI API
+          <select id="inst-api-profile"></select>
+        </label>
+
+        <div class="form-row-3">
+          <label>倍速 <small class="hint-inline">(1.0~2.0)</small>
+            <input type="number" id="inst-speed" min="1" max="2" step="0.25" value="2" />
+          </label>
+          <label>并发 <small class="hint-inline">(1~4，默认 4)</small>
+            <input type="number" id="inst-jobs" min="1" max="4" step="1" value="4" />
+          </label>
+          <label>未开放章节
+            <select id="inst-notopen">
+              <option value="retry">重试 (retry)</option>
+              <option value="continue">跳过 (continue)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="inst-redo-finished" /> 补救未提交测验</label>
+          <label><input type="checkbox" id="inst-no-cache" /> 禁用答题缓存</label>
+          <label><input type="checkbox" id="inst-auto-start" checked /> 立即启动</label>
+        </div>
+
+        <div class="modal-foot">
+          <button type="button" class="btn btn-text" data-close-modal="instance-modal">取消</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-instance">创建任务</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 更新登录弹窗 -->
+  <div id="reauth-modal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="reauth-modal"></div>
+    <div class="modal-dialog">
+      <div class="modal-head">
+        <h3 id="reauth-modal-title">更新扫码登录</h3>
+        <button class="icon-btn" data-close-modal="reauth-modal">&times;</button>
+      </div>
+      <div class="qr-box">
+        <img id="reauth-qr-img" class="qr-img hidden" alt="二维码" />
+        <div id="reauth-qr-placeholder" class="qr-placeholder">获取中...</div>
+      </div>
+      <div id="reauth-qr-status" class="banner banner-warn">使用学习通 App 扫码</div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-outlined" id="btn-reauth-refresh">刷新</button>
+        <button type="button" class="btn btn-text" data-close-modal="reauth-modal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日志弹窗 -->
+  <div id="log-modal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="log-modal"></div>
+    <div class="modal-dialog modal-xl">
+      <div class="modal-head">
+        <h3 id="log-modal-title">任务日志</h3>
+        <div class="btn-group">
+          <span class="chip chip-ok">实时 2s</span>
+          <button class="icon-btn" data-close-modal="log-modal">&times;</button>
+        </div>
+      </div>
+      <pre id="log-content" class="log-viewer">加载中...</pre>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-text" data-close-modal="log-modal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI API 弹窗 -->
+  <div id="api-modal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="api-modal"></div>
+    <div class="modal-dialog">
+      <div class="modal-head">
+        <h3 id="api-modal-title">添加 AI API</h3>
+        <button class="icon-btn" data-close-modal="api-modal">&times;</button>
+      </div>
+      <form id="api-form" class="form-grid">
+        <input type="hidden" id="api-id" />
+        <div class="preset-bar">
+          <button type="button" class="btn btn-tonal btn-sm" id="btn-preset-deepseek">填入 DeepSeek 模板</button>
+        </div>
+        <label>名称
+          <input type="text" id="api-name" required placeholder="DeepSeek" />
+        </label>
+        <label>Endpoint
+          <input type="url" id="api-endpoint" required placeholder="https://api.deepseek.com/v1" />
+        </label>
+        <label>API Key <small id="api-key-hint" class="hint-inline"></small>
+          <input type="password" id="api-key" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <label>Model
+          <input type="text" id="api-model" required placeholder="deepseek-chat" />
+        </label>
+        <div class="form-row-3">
+          <label>间隔 (秒)
+            <input type="number" id="api-min-interval" min="0" value="3" />
+          </label>
+          <label>覆盖率 (0~1)
+            <input type="number" id="api-cover-rate" min="0" max="1" step="0.05" value="0.9" />
+          </label>
+          <label>延迟 (秒)
+            <input type="number" id="api-delay" min="0" step="0.5" value="1.0" />
+          </label>
+        </div>
+        <label>HTTP 代理 (选填)
+          <input type="text" id="api-proxy" placeholder="留空直连" />
+        </label>
+        <div class="checkbox-row">
+          <label><input type="checkbox" id="api-submit" checked /> 自动提交</label>
+          <label><input type="checkbox" id="api-use-cache" checked /> 答题缓存</label>
+          <label><input type="checkbox" id="api-is-default" /> 设为默认</label>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-text" data-close-modal="api-modal">取消</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 安全阈值弹窗 -->
+  <div id="threshold-modal" class="modal hidden">
+    <div class="modal-backdrop" data-close-modal="threshold-modal"></div>
+    <div class="modal-dialog">
+      <div class="modal-head">
+        <h3>服务器安全阈值</h3>
+        <button class="icon-btn" data-close-modal="threshold-modal">&times;</button>
+      </div>
+      <form id="threshold-form" class="form-grid">
+        <p class="hint-line" id="threshold-rec-hint"></p>
+        <label>最大并发任务数
+          <input type="number" id="th-max-containers" min="1" max="100" required />
+        </label>
+        <div class="form-row-2">
+          <label>CPU 阈值 (%)
+            <input type="number" id="th-max-cpu" min="20" max="99" step="1" required />
+          </label>
+          <label>内存阈值 (%)
+            <input type="number" id="th-max-mem" min="20" max="99" step="1" required />
+          </label>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-text" data-close-modal="threshold-modal">取消</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

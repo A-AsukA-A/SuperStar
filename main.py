@@ -2,6 +2,8 @@
 import argparse
 import configparser
 import enum
+import os
+import signal
 import sys
 import threading
 import time
@@ -16,11 +18,13 @@ from tqdm import tqdm
 
 from api.answer import Tiku
 from api.base import Chaoxing, Account, StudyResult
+from api.config import GlobalConst as gc
 from api.exceptions import LoginError, InputFormatError
 from api.logger import configure_console_logger, logger
 from api.notification import Notification
 from api.live import Live
 from api.live_process import LiveProcessor
+from api.progress import ProgressReporter
 
 class ChapterResult(enum.Enum):
     SUCCESS=0,
@@ -97,6 +101,23 @@ def parse_args():
         action="store_true",
         help="强制重新处理平台标记为已完成的章节（用于补救保存但未提交的测验）",
     )
+    parser.add_argument(
+        "--cookies-path",
+        type=str,
+        default=None,
+        help="指定 cookies.txt 文件路径",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="非交互模式（禁用所有 input() 阻塞，适合容器与 Web 后台运行）",
+    )
+    parser.add_argument(
+        "--status-file",
+        type=str,
+        default=None,
+        help="任务进度状态文件路径（JSON）",
+    )
 
     # 在解析之前捕获 -h 的行为
     if len(sys.argv) == 2 and sys.argv[1] in {"-h", "--help"}:
@@ -107,8 +128,8 @@ def parse_args():
 
 
 def load_config_from_file(config_path):
-    """从配置文件加载设置"""
-    config = configparser.ConfigParser()
+    """从配置文件加载设置（禁用 % 插值，防止含 % 的配置值报错）"""
+    config = configparser.ConfigParser(interpolation=None)
     config.read(config_path, encoding="utf8")
     
     common_config: dict[str, Any] = {}
@@ -170,6 +191,9 @@ def build_config_from_args(args):
         "verbose": args.verbose,
         "redo_finished": args.redo_finished,
         "no_cache": args.no_cache,
+        "cookies_path": args.cookies_path,
+        "non_interactive": args.non_interactive,
+        "status_file": args.status_file,
     }
     return common_config, {}, {}
 
@@ -179,9 +203,19 @@ def init_config():
     args = parse_args()
 
     if args.config:
+        os.environ["CHAOXING_CONFIG_PATH"] = args.config
+        Tiku.CONFIG_PATH = args.config
         common_config, tiku_config, notification_config = load_config_from_file(args.config)
         if args.verbose:
             common_config["verbose"] = True
+        if args.use_cookies:
+            common_config["use_cookies"] = True
+        if args.cookies_path:
+            common_config["cookies_path"] = args.cookies_path
+        if args.non_interactive:
+            common_config["non_interactive"] = True
+        if args.status_file:
+            common_config["status_file"] = args.status_file
         return common_config, tiku_config, notification_config
     else:
         return build_config_from_args(args)
@@ -190,12 +224,20 @@ def init_config():
 
 def init_chaoxing(common_config, tiku_config):
     """初始化超星实例"""
+    cookies_path = common_config.get("cookies_path")
+    if cookies_path:
+        gc.COOKIES_PATH = cookies_path
+        os.environ["CHAOXING_COOKIES_PATH"] = cookies_path
+
     username = common_config.get("username", "")
     password = common_config.get("password", "")
     use_cookies = common_config.get("use_cookies", False)
+    non_interactive = bool(common_config.get("non_interactive", False))
     
     # 如果没有提供用户名密码，从命令行获取
     if (not username or not password) and not use_cookies:
+        if non_interactive:
+            raise LoginError("非交互模式下未提供账号密码且未启用 Cookie 登录")
         username = input("请输入你的手机号, 按回车确认\n手机号:")
         password = input("请输入你的密码, 按回车确认\n密码:")
     
@@ -212,21 +254,22 @@ def init_chaoxing(common_config, tiku_config):
     
     # 获取查询延迟设置
     
-    # 检查大模型连接（如果使用的是大模型题库）
-    # 根据配置文件中的 provider 判断是否为大模型题库
+    # 检查大模型连接（仅支持 AI API）
     provider = tiku_config.get('provider', '')
     provider_list = [name.strip() for name in provider.split(',') if name.strip()]
-    if any(name in ['AI', 'SiliconFlow'] for name in provider_list):
-        check_connection = tiku_config.get('check_llm_connection', 'true').lower() == 'true'
+    if 'AI' in provider_list and not getattr(tiku, 'DISABLE', False):
+        check_connection = str(tiku_config.get('check_llm_connection', 'true')).lower() == 'true'
         if check_connection:
             logger.info(f'正在验证大模型配置 (provider={provider})...')
             if not tiku.check_llm_connection():
                 logger.error('大模型连接检查失败')
-                choice = input('大模型连接检查失败，无法准确答题，是否继续运行？(Y/n): ').strip().lower()
-                # 直接回车默认继续运行
-                if choice not in ('', 'y', 'yes'):
-                    raise RuntimeError('用户取消运行')
-                logger.info('用户选择继续运行...')
+                if non_interactive:
+                    logger.warning('非交互模式：忽略大模型连接检查失败并继续运行...')
+                else:
+                    choice = input('大模型连接检查失败，无法准确答题，是否继续运行？(Y/n): ').strip().lower()
+                    if choice not in ('', 'y', 'yes'):
+                        raise RuntimeError('用户取消运行')
+                    logger.info('用户选择继续运行...')
 
     query_delay = tiku_config.get("delay", 0)
     
@@ -314,7 +357,7 @@ class ChapterTask:
 class JobProcessor:
     STOP_POINT = {"__stop__": True}
 
-    def __init__(self, chaoxing: Chaoxing, course: dict[str, Any], tasks: list[ChapterTask], config: dict[str, Any]):
+    def __init__(self, chaoxing: Chaoxing, course: dict[str, Any], tasks: list[ChapterTask], config: dict[str, Any], reporter: ProgressReporter | None = None):
         if "jobs" not in config or not config["jobs"]:
             config["jobs"] = 4
         
@@ -323,6 +366,7 @@ class JobProcessor:
         self.speed = config["speed"]
         self.max_tries = 5
         self.tasks = tasks
+        self.reporter = reporter
         self.failed_tasks: list[ChapterTask] = []
         self.task_queue: PriorityQueue[ChapterTask] = PriorityQueue()
         self.retry_queue: PriorityQueue[ChapterTask] = PriorityQueue()
@@ -373,17 +417,24 @@ class JobProcessor:
                 logger.debug("Queue worker stopped")
                 return
 
+            if self.reporter:
+                self.reporter.chapter_started(task.point["title"])
+
             task.result = process_chapter(self.chaoxing, self.course, task.point, self.speed)
 
             match task.result:
                 case ChapterResult.SUCCESS:
                     logger.debug("Task success: {}", task.point["title"])
+                    if self.reporter:
+                        self.reporter.chapter_finished(task.point["title"], success=True)
                     self.task_queue.task_done()
                     logger.debug(f"unfinished task: {self.task_queue.unfinished_tasks}")
 
                 case ChapterResult.NOT_OPEN:
                     if self.config["notopen_action"] == "continue":
                         logger.warning("章节未开启: {}, 正在跳过", task.point["title"])
+                        if self.reporter:
+                            self.reporter.chapter_finished(task.point["title"], success=True, skipped=True)
                         self.task_queue.task_done()
                         continue
 
@@ -393,6 +444,8 @@ class JobProcessor:
                             "章节未开启: {} 可能由于上一章节的章节检测未完成, 也可能由于该章节因为时效已关闭，"
                             "请手动检查完成并提交再重试。或者在配置中配置(自动跳过关闭章节/开启题库并启用提交)"
                         , task.point["title"])
+                        if self.reporter:
+                            self.reporter.chapter_finished(task.point["title"], success=False, skipped=True)
                         self.task_queue.task_done()
                         continue
 
@@ -406,6 +459,8 @@ class JobProcessor:
                     if task.tries >= self.max_tries:
                         logger.error("Max retries reached for task: {}", task.point["title"])
                         self.failed_tasks.append(task)
+                        if self.reporter:
+                            self.reporter.chapter_finished(task.point["title"], success=False)
                         self.task_queue.task_done()
                         continue
                     self.retry_queue.put(task)
@@ -413,6 +468,8 @@ class JobProcessor:
                 case _:
                     logger.error("Invalid task state {} for task {}", task.result, task.point["title"])
                     self.failed_tasks.append(task)
+                    if self.reporter:
+                        self.reporter.chapter_finished(task.point["title"], success=False)
                     self.task_queue.task_done()
 
     @log_error
@@ -475,35 +532,57 @@ def process_chapter(chaoxing: Chaoxing, course:dict[str, Any], point:dict[str, A
 
 
 
-def process_course(chaoxing: Chaoxing, course:dict[str, Any], config: dict):
-    """处理单个课程"""
-    logger.info(f"开始学习课程: {course['title']}")
+def process_course(chaoxing: Chaoxing, course:dict[str, Any], config: dict, course_index: int = 1, reporter: ProgressReporter | None = None):
+    """处理单个课程（先检查未完成章节，再调度执行）"""
+    logger.info(f"开始检查课程章节状态: {course['title']}")
     
     # 获取当前课程的所有章节
     point_list = chaoxing.get_course_point(
         course["courseId"], course["clazzId"], course["cpi"]
     )
+    all_points = point_list["points"]
+    force_redo = bool(getattr(chaoxing, "force_redo", False))
+
+    if not force_redo:
+        finished_count = sum(1 for p in all_points if p.get("has_finished"))
+        pending_pairs = [(i, p) for i, p in enumerate(all_points) if not p.get("has_finished")]
+        logger.info(
+            f"课程《{course['title']}》共 {len(all_points)} 章，已完成 {finished_count} 章，待处理 {len(pending_pairs)} 章"
+        )
+        if reporter:
+            reporter.start_course(course, course_index, len(all_points), initial_completed=finished_count)
+        if not pending_pairs:
+            logger.info(f"课程《{course['title']}》全部章节已完成，跳过执行")
+            if reporter:
+                reporter.finish_course()
+            return
+    else:
+        pending_pairs = list(enumerate(all_points))
+        logger.info(f"课程《{course['title']}》共 {len(all_points)} 章（--redo-finished 模式，全部纳入检查）")
+        if reporter:
+            reporter.start_course(course, course_index, len(all_points), initial_completed=0)
 
     # 为了支持课程任务回滚, 采用下标方式遍历任务点
-
     _old_format_sizeof = tqdm.format_sizeof
     tqdm.format_sizeof = format_time
     tqdm.set_lock(RLock())
 
-    tasks=[]
+    tasks = [ChapterTask(point=point, index=i) for i, point in pending_pairs]
 
-    for i, point in enumerate(point_list["points"]):
-        task = ChapterTask(point=point, index=i)
-        tasks.append(task)
-    p = JobProcessor(chaoxing, course, tasks, config)
+    p = JobProcessor(chaoxing, course, tasks, config, reporter=reporter)
     p.run()
 
+    if reporter:
+        reporter.finish_course()
 
     tqdm.format_sizeof = _old_format_sizeof
 
-def filter_courses(all_course, course_list):
+def filter_courses(all_course, course_list, non_interactive=False):
     """过滤要学习的课程"""
     if not course_list:
+        if non_interactive:
+            logger.warning("非交互模式下未指定课程ID，将学习全部课程")
+            return all_course
         # 手动输入要学习的课程ID列表
         print("*" * 10 + "课程列表" + "*" * 10)
         for course in all_course:
@@ -548,17 +627,26 @@ def format_time(num, suffix='', divisor=''):
 
 def main():
     """主程序入口"""
+    reporter = ProgressReporter(None)
     try:
         # 初始化配置
         common_config, tiku_config, notification_config = init_config()
         configure_console_logger("DEBUG" if common_config.get("verbose", False) else "INFO")
+        reporter = ProgressReporter(common_config.get("status_file"))
+        if threading.current_thread() is threading.main_thread():
+            def _handle_sigterm(signum, frame):
+                reporter.mark_stopped("收到停止信号")
+                raise KeyboardInterrupt("SIGTERM")
+            signal.signal(signal.SIGTERM, _handle_sigterm)
         
         # 强制播放按照配置文件调节
         common_config["speed"] = min(2.0, max(1.0, common_config.get("speed", 1.0)))
         common_config["notopen_action"] = common_config.get("notopen_action", "retry")
         
         # 初始化超星实例
+        reporter.set_status("starting", "正在初始化超星与 AI 答题配置...")
         chaoxing = init_chaoxing(common_config, tiku_config)
+        chaoxing.progress_reporter = reporter
         
         # 设置外部通知
         notification = Notification()
@@ -567,6 +655,7 @@ def main():
         notification.init_notification()
         
         # 检查当前登录状态
+        reporter.set_status("starting", "正在校验登录会话...")
         _login_state = chaoxing.login(login_with_cookies=common_config.get("use_cookies", False))
         if not _login_state["status"]:
             raise LoginError(_login_state["msg"])
@@ -575,23 +664,32 @@ def main():
         all_course = chaoxing.get_course_list()
         
         # 过滤要学习的课程
-        course_task = filter_courses(all_course, common_config.get("course_list"))
+        course_task = filter_courses(
+            all_course,
+            common_config.get("course_list"),
+            non_interactive=bool(common_config.get("non_interactive", False)),
+        )
+        reporter.set_courses(course_task)
         
         # 开始学习
         logger.info(f"课程列表过滤完毕, 当前课程任务数量: {len(course_task)}")
-        for course in course_task:
-            process_course(chaoxing, course, common_config)
+        for idx, course in enumerate(course_task, 1):
+            process_course(chaoxing, course, common_config, course_index=idx, reporter=reporter)
         
+        reporter.mark_completed()
         logger.info("所有课程学习任务已完成")
         notification.send("chaoxing : 所有课程学习任务已完成")
         
     except SystemExit as e:
         if e.code != 0:
+            reporter.mark_error(f"程序异常退出, 返回码: {e.code}")
             logger.error(f"错误: 程序异常退出, 返回码: {e.code}")
         sys.exit(e.code)
     except KeyboardInterrupt as e:
+        reporter.mark_stopped("任务已被用户停止")
         logger.error(f"错误: 程序被用户手动中断, {e}")
     except BaseException as e:
+        reporter.mark_error(f"{type(e).__name__}: {e}")
         logger.error(f"错误: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
         try:

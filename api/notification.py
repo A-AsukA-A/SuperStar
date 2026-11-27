@@ -4,6 +4,7 @@
 """
 
 import configparser
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, Optional
 
@@ -44,11 +45,14 @@ class NotificationService(ABC):
         Returns:
             成功返回配置字典，失败返回None
         """
+        config_path = os.environ.get("CHAOXING_CONFIG_PATH") or self.CONFIG_PATH
         try:
-            config = configparser.ConfigParser()
-            config.read(self.CONFIG_PATH, encoding="utf8")
-            return config['notification']
-        except (KeyError, FileNotFoundError):
+            config = configparser.ConfigParser(interpolation=None)
+            read_files = config.read(config_path, encoding="utf8")
+            if not read_files:
+                raise FileNotFoundError(config_path)
+            return dict(config.items("notification"))
+        except (KeyError, configparser.NoSectionError, FileNotFoundError):
             logger.info("未找到notification配置，已忽略外部通知功能")
             self.disabled = True
             return None

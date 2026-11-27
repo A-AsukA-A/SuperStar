@@ -162,3 +162,11 @@ requirements.local.txt
 作业列表.txt
 .venv/
 libs/
+data/
+instances/
+runs/
+accounts.json
+*.sqlite3
+.env
+.env.*
+*.bak.*

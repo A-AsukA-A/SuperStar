@@ -1,0 +1,22 @@
+services:
+  superstar:
+    build: .
+    image: superstar:latest
+    container_name: superstar
+    restart: unless-stopped
+    entrypoint: ["python3", "run_web.py"]
+    ports:
+      - "${WEB_PORT:-5000}:5000"
+    environment:
+      WEB_HOST: "0.0.0.0"
+      WEB_PORT: "5000"
+      WEB_USERNAME: "${WEB_USERNAME:-admin}"
+      WEB_PASSWORD: "${WEB_PASSWORD:-}"
+    volumes:
+      - ./data:/app/data
+      - ./instances:/app/instances
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

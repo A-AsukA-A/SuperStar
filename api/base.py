@@ -20,6 +20,7 @@ from api.answer_check import cut
 from api.cipher import AESCipher
 from api.config import GlobalConst as gc
 from api.cookies import save_cookies, use_cookies
+from api.progress import format_sec
 from api.decode import (
     decode_course_list,
     decode_course_point,
@@ -138,6 +139,7 @@ class Chaoxing:
         self.tiku = tiku
         self.kwargs = kwargs
         self.rollback_times = 0
+        self.progress_reporter = None
         self.rate_limiter = RateLimiter(0.5)  # 其他接口速率限制比较松
         self.video_log_limiter = RateLimiter(2)  # 上报进度极其容易卡验证码，限制2s一次
 
@@ -179,30 +181,8 @@ class Chaoxing:
 
     def _validate_cookie_session(self) -> bool:
         session = SessionManager.get_instance()._session
-        if not session.cookies.get("_uid"):
-            return False
-
-        test_session = requests.Session()
-        test_session.headers.update(gc.HEADERS)
-        test_session.cookies.update(session.cookies.get_dict())
-
-        try:
-            resp = test_session.post(
-                "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata",
-                data={"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0},
-                timeout=8,
-            )
-        except RequestException as exc:
-            logger.debug("Cookie validation request failed: {}", exc)
-            return False
-
-        if resp.status_code != 200:
-            return False
-
-        if "passport2.chaoxing.com" in resp.text or "login" in resp.text.lower():
-            return False
-
-        return True
+        result = validate_cookies_dict(session.cookies.get_dict())
+        return result["valid"]
 
     def get_fid(self):
         _session = SessionManager.get_session()
@@ -579,6 +559,15 @@ class Chaoxing:
             wait_time = min(wait_time, 30)
 
         logger.info(f"开始任务: {_job['name']}, 总时长: {duration}s, 已进行: {play_time}s, 倍速: {_speed}x")
+        if self.progress_reporter:
+            self.progress_reporter.update_job(
+                "video",
+                _job.get("name", "视频"),
+                int(play_time),
+                duration,
+                f"{format_sec(play_time)} / {format_sec(duration)}",
+                force=True,
+            )
 
         pbar = tqdm(total=duration, initial=play_time, desc=_job["name"],
                     unit_scale=True, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}')
@@ -589,6 +578,10 @@ class Chaoxing:
         passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, duration,
                                                 _type, headers=headers, _isdrag=4)
         if passed:
+            if self.progress_reporter:
+                self.progress_reporter.update_job(
+                    "video", _job.get("name", "视频"), duration, duration, "瞬间完成", force=True
+                )
             logger.info("任务瞬间完成: {}", _job['name'])
             return StudyResult.SUCCESS
 
@@ -634,8 +627,25 @@ class Chaoxing:
 
             pbar.n = int(play_time)
             pbar.refresh()
+            if self.progress_reporter:
+                self.progress_reporter.update_job(
+                    "video",
+                    _job.get("name", "视频"),
+                    int(play_time),
+                    duration,
+                    f"{format_sec(play_time)} / {format_sec(duration)}",
+                )
             time.sleep(gc.THRESHOLD)
 
+        if self.progress_reporter:
+            self.progress_reporter.update_job(
+                "video",
+                _job.get("name", "视频"),
+                duration,
+                duration,
+                f"{format_sec(duration)} / {format_sec(duration)}",
+                force=True,
+            )
         logger.info("任务完成: {}", _job['name'])
         return StudyResult.SUCCESS
 
@@ -664,6 +674,10 @@ class Chaoxing:
             - re module for regular expression matching
         """
         _session = SessionManager.get_session()
+        if self.progress_reporter:
+            self.progress_reporter.update_job(
+                "document", str(_job.get("name") or _job.get("jobid") or "文档"), 1, 1, "处理中", force=True
+            )
         _url = f"https://mooc1.chaoxing.com/ananas/job/document?jobid={_job['jobid']}&knowledgeid={re.findall(r'nodeId_(.*?)-', _job['otherinfo'])[0]}&courseid={_course['courseId']}&clazzid={_course['clazzId']}&jtoken={_job['jtoken']}&_dc={get_timestamp()}"
         _resp = _session.get(_url)
         if _resp.status_code != 200:
@@ -988,7 +1002,15 @@ class Chaoxing:
         # 搜题
         total_questions = len(questions["questions"])
         found_answers = 0
-        for q in questions["questions"]:
+        for q_idx, q in enumerate(questions["questions"], 1):
+            if self.progress_reporter:
+                self.progress_reporter.update_job(
+                    "work",
+                    _work_title or str(_job.get("jobid", "测验")),
+                    q_idx,
+                    total_questions,
+                    f"第 {q_idx}/{total_questions} 题",
+                )
             logger.debug(f"当前题目信息 -> {q}")
             # 添加搜题延迟 #428 - 默认0s延迟
             query_delay = self.kwargs.get("query_delay", 0)
@@ -1135,6 +1157,10 @@ class Chaoxing:
         阅读任务学习, 仅完成任务点, 并不增长时长
         """
         _session = SessionManager.get_session()
+        if self.progress_reporter:
+            self.progress_reporter.update_job(
+                "read", str(_job.get("name") or _job.get("jobid") or "阅读"), 1, 1, "处理中", force=True
+            )
         _resp = _session.get(
             url="https://mooc1.chaoxing.com/ananas/job/readv2",
             params={
@@ -1175,3 +1201,73 @@ class Chaoxing:
         else:
             logger.info(f"空页面任务完成 -> {point['title']}")
             return StudyResult.SUCCESS
+
+
+def _build_isolated_session(cookies: dict[str, str]) -> requests.Session:
+    """创建不依赖全局 SessionManager 单例的临时请求会话。"""
+    session = requests.Session()
+    session.headers.update(gc.HEADERS)
+    if cookies:
+        session.cookies.update(cookies)
+    return session
+
+
+def validate_cookies_dict(cookies: dict[str, str]) -> dict:
+    """校验给定 Cookie 字典是否仍有效（不修改全局 SessionManager）。"""
+    if not cookies:
+        return {"valid": False, "uid": None, "msg": "未提供 Cookie"}
+    uid = cookies.get("_uid") or cookies.get("UID")
+    if not uid:
+        return {"valid": False, "uid": None, "msg": "Cookie 缺少 _uid/UID 字段"}
+
+    test_session = _build_isolated_session(cookies)
+    headers = {
+        "Referer": "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans",
+    }
+    try:
+        resp = test_session.post(
+            "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata",
+            headers=headers,
+            data={"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0},
+            timeout=8,
+        )
+    except RequestException as exc:
+        logger.debug("Cookie validation request failed: {}", exc)
+        return {"valid": False, "uid": uid, "msg": f"网络校验失败: {exc}"}
+
+    if resp.status_code != 200:
+        return {"valid": False, "uid": uid, "msg": f"校验响应状态异常: HTTP {resp.status_code}"}
+
+    final_url = str(getattr(resp, "url", "")).lower()
+    if "passport2.chaoxing.com" in final_url or "passport2.chaoxing.com" in resp.text or "<title>用户登录" in resp.text:
+        return {"valid": False, "uid": uid, "msg": "Cookie 已过期或被重定向到登录页"}
+
+    return {"valid": True, "uid": str(uid), "msg": "会话有效"}
+
+
+def fetch_courses_with_cookies(cookies: dict[str, str]) -> list[dict]:
+    """使用独立会话拉取当前账号全部课程列表（供 Web 前端选课使用）。"""
+    session = _build_isolated_session(cookies)
+    url = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata"
+    headers = {
+        "Referer": "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans",
+    }
+    data = {"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0}
+    resp = session.post(url, headers=headers, data=data, timeout=10)
+    resp.raise_for_status()
+    course_list = decode_course_list(resp.text)
+
+    interaction_resp = session.get("https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction", timeout=10)
+    if interaction_resp.status_code == 200:
+        for folder in decode_course_folder(interaction_resp.text):
+            folder_data = {
+                "courseType": 1,
+                "courseFolderId": folder["id"],
+                "query": "",
+                "superstarClass": 0,
+            }
+            folder_resp = session.post(url, headers=headers, data=folder_data, timeout=10)
+            if folder_resp.status_code == 200:
+                course_list += decode_course_list(folder_resp.text)
+
+    return course_list
