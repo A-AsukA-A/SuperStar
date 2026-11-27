@@ -309,7 +309,7 @@
   <!-- 学习通后台与测验核查弹窗 -->
   <div id="portal-modal" class="modal hidden">
     <div class="modal-backdrop" data-close-modal="portal-modal"></div>
-    <div class="modal-dialog modal-lg">
+    <div class="modal-dialog modal-xl">
       <div class="modal-head">
         <h3 id="portal-modal-title">学习通后台</h3>
         <div class="btn-group">
@@ -320,17 +320,33 @@
       </div>
 
       <div class="banner banner-ok" style="margin-bottom: 10px;">
-        提示：浏览器如尚未登录学习通，首次点击跳转后扫码登录一次，即可直接进入各门课程章节与测验详情页面手动核查。
+        已直接复用该任务保存的登录 Cookie：点击任意课程的「免登录查章节与测验」，即可无需扫码直接浏览全部章节完成度并新开原版测验/成绩页面。
       </div>
       <div id="portal-warning" class="banner banner-warn hidden" style="margin-bottom: 10px;"></div>
 
       <div class="surface-box" style="margin-bottom: 12px;">
         <div class="box-head">
-          <span>任务课程直达入口</span>
+          <span>任务课程列表</span>
         </div>
         <div id="portal-course-list" class="portal-course-list">
           <div class="empty-hint">加载中...</div>
         </div>
+      </div>
+
+      <div id="portal-browser-box" class="portal-browser-box hidden" style="margin-bottom: 12px;">
+        <div class="box-head">
+          <span id="portal-browser-title">章节与测验列表</span>
+          <span id="portal-browser-stats" class="hint-inline"></span>
+        </div>
+        <div class="portal-filter-bar">
+          <div class="btn-group">
+            <button type="button" class="btn btn-tonal btn-sm portal-filter-btn active" data-filter="all">全部</button>
+            <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="unfinished">未完成</button>
+            <button type="button" class="btn btn-outlined btn-sm portal-filter-btn" data-filter="finished">已完成</button>
+          </div>
+          <input type="text" id="portal-chapter-search" class="toolbar-input" placeholder="搜索章节标题..." />
+        </div>
+        <div id="portal-chapter-list" class="portal-chapter-list"></div>
       </div>
 
       <div class="portal-options-box">

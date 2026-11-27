@@ -392,6 +392,34 @@ code {
   font-family: Consolas, "Courier New", monospace; font-size: 0.78rem; line-height: 1.45;
   color: #e2e8f0; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
 }
+.portal-browser-box {
+  background: var(--bg); border: 1px solid var(--border-light); border-radius: 14px; padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.portal-filter-bar {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.portal-chapter-list {
+  display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; padding-right: 2px;
+}
+.portal-chapter-item {
+  background: var(--surface); border: 1px solid var(--border-light); border-radius: 10px; overflow: hidden;
+}
+.portal-chapter-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 8px 11px; cursor: pointer; font-size: 0.84rem;
+}
+.portal-chapter-head:hover { background: var(--surface-variant); }
+.portal-chapter-title { flex: 1; min-width: 0; color: var(--text); font-weight: 500; word-break: break-word; }
+.portal-chapter-cards {
+  border-top: 1px solid var(--border-light); background: var(--surface-variant);
+  padding: 8px 11px; display: flex; flex-direction: column; gap: 6px;
+}
+.portal-card-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--surface); border-radius: 8px; padding: 6px 9px; font-size: 0.81rem;
+}
+.portal-card-name { flex: 1; min-width: 0; color: var(--text); word-break: break-word; }
 a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 
 .toast {

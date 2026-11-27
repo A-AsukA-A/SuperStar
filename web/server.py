@@ -415,6 +415,53 @@ def create_app() -> Flask:
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.get("/api/instances/<instance_id>/courses/<course_id>/chapters")
+    def get_instance_course_chapters(instance_id: str, course_id: str):
+        try:
+            data = instance_manager.get_course_chapters(instance_id, course_id)
+            return jsonify({"ok": True, **data})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"拉取章节列表失败: {exc}"}), 502
+
+    @app.get("/api/instances/<instance_id>/courses/<course_id>/chapters/<knowledge_id>/cards")
+    def get_instance_chapter_cards(instance_id: str, course_id: str, knowledge_id: str):
+        try:
+            data = instance_manager.get_chapter_cards(instance_id, course_id, knowledge_id)
+            return jsonify({"ok": True, **data})
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"拉取章节任务点失败: {exc}"}), 502
+
+    @app.get("/api/instances/<instance_id>/chaoxing-work")
+    def proxy_instance_chaoxing_work(instance_id: str):
+        try:
+            html, _ = instance_manager.fetch_chaoxing_work_html(
+                instance_id,
+                {
+                    "courseId": request.args.get("courseId", ""),
+                    "clazzId": request.args.get("clazzId", ""),
+                    "cpi": request.args.get("cpi", ""),
+                    "knowledgeId": request.args.get("knowledgeId", ""),
+                    "jobid": request.args.get("jobid", ""),
+                    "ktoken": request.args.get("ktoken", ""),
+                    "enc": request.args.get("enc", ""),
+                },
+            )
+            return Response(html, mimetype="text/html; charset=utf-8")
+        except KeyError as exc:
+            return Response(f"<h3>{exc}</h3>", status=404, mimetype="text/html; charset=utf-8")
+        except ValueError as exc:
+            return Response(f"<h3>{exc}</h3>", status=400, mimetype="text/html; charset=utf-8")
+        except Exception as exc:
+            return Response(f"<h3>加载测验页面失败: {exc}</h3>", status=502, mimetype="text/html; charset=utf-8")
+
     # ---------------- 按课程划分的自建题库 ----------------
 
     @app.get("/api/bank/courses")

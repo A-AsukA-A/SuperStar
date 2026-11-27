@@ -13,13 +13,15 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import urlencode, urlparse
 import uuid
 from typing import Any
 
 import psutil
 
-from api.base import fetch_courses_with_cookies
+from api.base import _build_isolated_session, fetch_courses_with_cookies
 from api.cookies import parse_cookie_string, save_cookies_dict, use_cookies
+from api.decode import decode_course_point
 from web.api_store import api_store
 from web.session_store import session_store
 from web.system_monitor import check_safety_guard
@@ -54,6 +56,32 @@ def _build_chaoxing_course_url(course_id: str, clazz_id: str, cpi: str) -> str:
         f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
         f"?courseid={course_id}&clazzid={clazz_id}&cpi={cpi}&ut=s"
     )
+
+
+def _inject_html_base(html: str, final_url: str, banner_text: str = "") -> str:
+    parsed = urlparse(final_url or "https://mooc1.chaoxing.com/mooc-ans/")
+    if parsed.scheme and parsed.netloc:
+        dir_path = (parsed.path.rsplit("/", 1)[0] + "/") if "/" in parsed.path else "/"
+        base_href = f"{parsed.scheme}://{parsed.netloc}{dir_path}"
+    else:
+        base_href = "https://mooc1.chaoxing.com/mooc-ans/"
+    safe_base = base_href.replace('"', "&quot;")
+    base_tag = f'<base href="{safe_base}" target="_blank">'
+    if re.search(r"<head[^>]*>", html, flags=re.I):
+        out = re.sub(r"(<head[^>]*>)", lambda m: m.group(1) + base_tag, html, count=1, flags=re.I)
+    else:
+        out = base_tag + html
+    if banner_text:
+        banner_html = (
+            '<div style="background:#e8f0fe;color:#1a73e8;padding:8px 14px;'
+            'font-family:sans-serif;font-size:13px;border-bottom:1px solid #d2e3fc;">'
+            f"{banner_text}</div>"
+        )
+        if re.search(r"<body[^>]*>", out, flags=re.I):
+            out = re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + banner_html, out, count=1, flags=re.I)
+        else:
+            out = banner_html + out
+    return out
 
 
 def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
@@ -699,6 +727,239 @@ class InstanceManager:
             "failed_works_md": failed_works_md,
             "warning": warning,
         }
+
+    def _resolve_course_context(self, instance_id: str, course_id: str) -> tuple[dict[str, Any], dict[str, str], str, str]:
+        inst_dir = self._inst_dir(instance_id)
+        meta_path = os.path.join(inst_dir, "meta.json")
+        meta = _read_json(meta_path)
+        if not meta:
+            raise KeyError("未找到指定任务")
+
+        cid = str(course_id or "").strip()
+        if not re.fullmatch(r"\d{1,30}", cid):
+            raise ValueError("非法的课程 ID")
+
+        info = (meta.get("course_links") or {}).get(cid) or {}
+        clazz_id = str(info.get("clazzId") or "").strip()
+        cpi = str(info.get("cpi") or "").strip()
+        if not (clazz_id and cpi):
+            self.get_instance_portal(instance_id, refresh=False)
+            meta = _read_json(meta_path) or meta
+            info = (meta.get("course_links") or {}).get(cid) or {}
+            clazz_id = str(info.get("clazzId") or "").strip()
+            cpi = str(info.get("cpi") or "").strip()
+        if not (clazz_id and cpi):
+            raise ValueError("未能获取该课程的 clazzId/cpi 参数，请先点击「刷新课程链接」或重新扫码登录")
+
+        cookies = use_cookies(os.path.join(inst_dir, "cookies.txt"))
+        if not cookies:
+            raise ValueError("当前任务暂无有效 Cookie，请先点击卡片「登录」重新扫码")
+        return meta, cookies, clazz_id, cpi
+
+    def get_course_chapters(self, instance_id: str, course_id: str) -> dict[str, Any]:
+        meta, cookies, clazz_id, cpi = self._resolve_course_context(instance_id, course_id)
+        cid = str(course_id).strip()
+        session = _build_isolated_session(cookies)
+        url = _build_chaoxing_course_url(cid, clazz_id, cpi)
+        resp = session.get(url, timeout=12)
+        if resp.status_code != 200:
+            raise ValueError(f"学习通返回异常状态码: HTTP {resp.status_code}")
+
+        final_url = str(getattr(resp, "url", "")).lower()
+        if "passport2.chaoxing.com" in final_url or "<title>用户登录" in resp.text:
+            raise ValueError("该任务的 Cookie 已过期，请先点击卡片「登录」重新扫码")
+
+        cp = decode_course_point(resp.text)
+        points = cp.get("points") or []
+        completed = sum(1 for p in points if p.get("has_finished"))
+        titles = meta.get("course_titles") or {}
+        info = (meta.get("course_links") or {}).get(cid) or {}
+        return {
+            "course_id": cid,
+            "title": str(titles.get(cid) or info.get("title") or f"课程 {cid}"),
+            "clazzId": clazz_id,
+            "cpi": cpi,
+            "total": len(points),
+            "completed": completed,
+            "unfinished": max(0, len(points) - completed),
+            "has_locked": bool(cp.get("hasLocked")),
+            "points": points,
+        }
+
+    def get_chapter_cards(self, instance_id: str, course_id: str, knowledge_id: str) -> dict[str, Any]:
+        _, cookies, clazz_id, cpi = self._resolve_course_context(instance_id, course_id)
+        cid = str(course_id).strip()
+        kid = str(knowledge_id or "").strip()
+        if not re.fullmatch(r"\d{1,30}", kid):
+            raise ValueError("非法的章节 ID")
+
+        session = _build_isolated_session(cookies)
+        cards: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        not_open = False
+
+        for num in ("0", "1", "2", "3", "4"):
+            resp = session.get(
+                "https://mooc1.chaoxing.com/mooc-ans/knowledge/cards",
+                params={
+                    "clazzid": clazz_id,
+                    "courseid": cid,
+                    "knowledgeid": kid,
+                    "ut": "s",
+                    "cpi": cpi,
+                    "num": num,
+                    "mooc2": 1,
+                },
+                timeout=12,
+            )
+            if resp.status_code != 200:
+                break
+            final_url = str(getattr(resp, "url", "")).lower()
+            if "passport2.chaoxing.com" in final_url or "<title>用户登录" in resp.text:
+                raise ValueError("该任务的 Cookie 已过期，请先点击卡片「登录」重新扫码")
+            if "章节未开放" in resp.text:
+                not_open = True
+                break
+
+            match = re.search(r"mArg\s*=\s*(\{.*?\});\s*(?:\r?\n|$|<)", resp.text, re.S)
+            if not match:
+                if num != "0":
+                    break
+                continue
+            try:
+                data = json.loads(match.group(1))
+            except ValueError:
+                if num != "0":
+                    break
+                continue
+
+            attachments = data.get("attachments") or []
+            if not attachments and num != "0":
+                break
+            ktoken = str((data.get("defaults") or {}).get("ktoken") or "")
+
+            for card in attachments:
+                card_type = str(card.get("type") or "").lower()
+                prop = card.get("property") or {}
+                if not card_type and not card.get("jobid"):
+                    continue
+                jobid = str(card.get("jobid") or "")
+                name = str(
+                    prop.get("title")
+                    or prop.get("name")
+                    or prop.get("bookname")
+                    or jobid
+                    or card_type
+                    or "未命名任务点"
+                )
+                dedup_key = (card_type, jobid, name)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                is_passed_raw = card.get("isPassed")
+                is_passed = bool(is_passed_raw) if is_passed_raw is not None else None
+                enc = str(card.get("enc") or "")
+                view_url = ""
+                if card_type == "workid" and jobid:
+                    qs = urlencode(
+                        {
+                            "courseId": cid,
+                            "clazzId": clazz_id,
+                            "cpi": cpi,
+                            "knowledgeId": kid,
+                            "jobid": jobid,
+                            "ktoken": ktoken,
+                            "enc": enc,
+                        }
+                    )
+                    view_url = f"/api/instances/{instance_id}/chaoxing-work?{qs}"
+
+                cards.append(
+                    {
+                        "type": card_type or "other",
+                        "name": name,
+                        "jobid": jobid,
+                        "is_passed": is_passed,
+                        "view_url": view_url,
+                    }
+                )
+
+        return {
+            "course_id": cid,
+            "knowledge_id": kid,
+            "not_open": not_open,
+            "cards": cards,
+        }
+
+    def fetch_chaoxing_work_html(self, instance_id: str, params: dict[str, str]) -> tuple[str, str]:
+        inst_dir = self._inst_dir(instance_id)
+        meta = _read_json(os.path.join(inst_dir, "meta.json"))
+        if not meta:
+            raise KeyError("未找到指定任务")
+
+        cookies = use_cookies(os.path.join(inst_dir, "cookies.txt"))
+        if not cookies:
+            raise ValueError("当前任务暂无有效 Cookie，请先点击卡片「登录」重新扫码")
+
+        course_id = str(params.get("courseId") or "").strip()
+        clazz_id = str(params.get("clazzId") or "").strip()
+        knowledge_id = str(params.get("knowledgeId") or "").strip()
+        jobid = str(params.get("jobid") or "").strip()
+        ktoken = str(params.get("ktoken") or "").strip()
+        enc = str(params.get("enc") or "").strip()
+        cpi = str(params.get("cpi") or "").strip()
+        if not cpi:
+            cpi = str(((meta.get("course_links") or {}).get(course_id) or {}).get("cpi") or "").strip()
+
+        if not (
+            re.fullmatch(r"\d{1,30}", course_id)
+            and re.fullmatch(r"\d{1,30}", clazz_id)
+            and re.fullmatch(r"\d{1,30}", knowledge_id)
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", jobid)
+        ):
+            raise ValueError("缺少或包含非法的测验查询参数")
+
+        session = _build_isolated_session(cookies)
+        work_id = jobid[5:] if jobid.startswith("work-") else jobid
+        resp = session.get(
+            "https://mooc1.chaoxing.com/mooc-ans/api/work",
+            params={
+                "api": "1",
+                "workId": work_id,
+                "jobid": jobid,
+                "originJobId": jobid,
+                "needRedirect": "true",
+                "skipHeader": "true",
+                "knowledgeid": knowledge_id,
+                "ktoken": ktoken,
+                "cpi": cpi,
+                "ut": "s",
+                "clazzId": clazz_id,
+                "type": "",
+                "enc": enc,
+                "mooc2": "1",
+                "courseid": course_id,
+            },
+            timeout=12,
+        )
+        final_url = str(getattr(resp, "url", ""))
+        if "passport2.chaoxing.com" in final_url.lower() or "<title>用户登录" in resp.text:
+            expired_html = (
+                "<!DOCTYPE html><html lang='zh-CN'><meta charset='utf-8'>"
+                "<body style='font-family:sans-serif;padding:32px;color:#d93025;'>"
+                "<h3>该任务的 Cookie 已过期</h3>"
+                "<p>请回到 SuperStar 面板点击该任务卡片上的「登录」重新扫码后再试。</p>"
+                "</body></html>"
+            )
+            return expired_html, final_url
+
+        html = _inject_html_base(
+            resp.text,
+            final_url,
+            banner_text="已通过任务保存的 Cookie 免登录加载学习通测验 / 成绩原页（只读核查视图）",
+        )
+        return html, final_url
 
 
 instance_manager = InstanceManager()
