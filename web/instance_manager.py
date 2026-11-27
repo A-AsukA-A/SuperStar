@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """隔离刷课任务进程管理器（单容器 / 本地通用的轻量隔离进程架构）。"""
 
+from collections import deque
 import configparser
 from io import StringIO
 import json
@@ -83,9 +84,15 @@ _LOGURU_LINE_RE = re.compile(
 
 def _filter_key_log_lines(text: str, tail: int) -> str:
     """过滤掉 TRACE / DEBUG 刷屏行，保留 INFO / WARNING / ERROR 及多行堆栈。"""
+    lines = text.splitlines()
+    has_loguru = any(_LOGURU_LINE_RE.match(line) for line in lines)
+    if not has_loguru:
+        return "\n".join(lines[-tail:])
+
     kept: list[str] = []
-    keep_continuation = True
-    for line in text.splitlines():
+    # 默认丢弃首个时间戳前被截断出来的多行 TRACE/DEBUG 碎片（如 HTML 片段）
+    keep_continuation = False
+    for line in lines:
         m = _LOGURU_LINE_RE.match(line)
         if m:
             level = m.group(1).upper()
@@ -100,8 +107,7 @@ def _tail_file(path: str, lines: int = 200) -> str:
         return ""
     try:
         with open(path, "r", encoding="utf8", errors="replace") as f:
-            all_lines = f.readlines()
-        return "".join(all_lines[-lines:])
+            return "".join(deque(f, maxlen=lines))
     except OSError:
         return ""
 

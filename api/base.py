@@ -314,7 +314,7 @@ class Chaoxing:
         logger.trace("开始读取课程所有章节...")
         _resp = _session.get(_url)
 
-        logger.trace(f"原始章节列表内容:\n{_resp.text}")
+        logger.trace(f"原始章节列表内容长度: {len(_resp.text)}")
         logger.info("课程章节读取成功...")
         return decode_course_point(_resp.text)
 
@@ -342,7 +342,7 @@ class Chaoxing:
             _resp = _session.get("https://mooc1.chaoxing.com/mooc-ans/knowledge/cards", params=cards_params)
             if _resp.status_code != 200:
                 logger.error(f"未知错误: {_resp.status_code} 正在跳过")
-                logger.error(_resp.text)
+                logger.error(_resp.text[:500])
                 return [], {}
 
             _job_list, _job_info = decode_course_card(_resp.text)
@@ -357,7 +357,7 @@ class Chaoxing:
         if not job_list:
             self.study_emptypage(course, point)
 
-        logger.trace(f"原始任务点列表内容:\n{_resp.text}")
+        logger.trace(f"原始任务点列表内容长度: {len(_resp.text)}")
         logger.info("章节任务点读取成功...")
 
         return job_list, job_info
