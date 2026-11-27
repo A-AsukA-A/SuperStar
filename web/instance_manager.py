@@ -76,6 +76,25 @@ def _read_json(path: str) -> dict[str, Any] | None:
         return None
 
 
+_LOGURU_LINE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+(?:\s+[+-]\d{2}:\d{2})?\s+\|\s+([A-Z]+)\s+\|"
+)
+
+
+def _filter_key_log_lines(text: str, tail: int) -> str:
+    """过滤掉 TRACE / DEBUG 刷屏行，保留 INFO / WARNING / ERROR 及多行堆栈。"""
+    kept: list[str] = []
+    keep_continuation = True
+    for line in text.splitlines():
+        m = _LOGURU_LINE_RE.match(line)
+        if m:
+            level = m.group(1).upper()
+            keep_continuation = level not in {"TRACE", "DEBUG"}
+        if keep_continuation:
+            kept.append(line)
+    return "\n".join(kept[-tail:])
+
+
 def _tail_file(path: str, lines: int = 200) -> str:
     if not os.path.exists(path):
         return ""
@@ -479,16 +498,19 @@ class InstanceManager:
                 self.delete_instance(instance_id)
             return len(completed_ids)
 
-    def get_logs(self, instance_id: str, tail: int = 200) -> str:
+    def get_logs(self, instance_id: str, tail: int = 200, include_trace: bool = False) -> str:
         inst_dir = self._inst_dir(instance_id)
         meta = _read_json(os.path.join(inst_dir, "meta.json"))
         if not meta:
             raise KeyError("未找到指定任务")
 
         tail = max(10, min(1000, int(tail)))
+        raw_tail = tail if include_trace else max(tail * 8, 2000)
         chaoxing_log = os.path.join(inst_dir, "chaoxing.log")
         runner_log = os.path.join(inst_dir, "runner.log")
-        text = _tail_file(chaoxing_log, tail) or _tail_file(runner_log, tail)
+        text = _tail_file(chaoxing_log, raw_tail) or _tail_file(runner_log, raw_tail)
+        if not include_trace and text:
+            text = _filter_key_log_lines(text, tail)
         return mask_sensitive_log(text)
 
     def update_instance_cookies(self, instance_id: str, cookies: dict[str, str]) -> dict[str, Any]:

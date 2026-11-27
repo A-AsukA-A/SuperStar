@@ -380,8 +380,9 @@ def create_app() -> Flask:
             tail = int(request.args.get("tail", 200))
         except ValueError:
             tail = 200
+        include_trace = request.args.get("trace", "").lower() in {"1", "true", "yes"}
         try:
-            logs = instance_manager.get_logs(instance_id, tail=tail)
+            logs = instance_manager.get_logs(instance_id, tail=tail, include_trace=include_trace)
             return jsonify({"ok": True, "logs": logs})
         except KeyError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 404

@@ -272,6 +272,11 @@ code {
 .course-item-meta { display: flex; flex-direction: column; }
 .course-item-sub { font-size: 0.76rem; color: var(--text-secondary); }
 
+.log-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.8rem; color: var(--text-secondary); cursor: pointer; user-select: none;
+}
+
 .log-viewer {
   background: #1e1f22; border-radius: 12px; padding: 14px; margin: 0;
   font-family: Consolas, "Courier New", monospace; font-size: 0.8rem;

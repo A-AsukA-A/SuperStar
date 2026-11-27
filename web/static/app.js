@@ -866,20 +866,24 @@ $("#btn-clear-completed").addEventListener("click", async () => {
 window.openInstanceLogs = async (id, name) => {
   activeLogInstanceId = id;
   $("#log-modal-title").textContent = `日志 · ${name}`;
+  const traceToggle = $("#log-include-trace");
+  traceToggle.checked = false;
   const viewer = $("#log-content");
   viewer.textContent = "加载中...";
   $("#log-modal").classList.remove("hidden");
 
   const pullLogs = async () => {
     if (!activeLogInstanceId) return;
-    const { ok, data } = await apiFetch(`/api/instances/${activeLogInstanceId}/logs?tail=300`);
+    const traceParam = traceToggle.checked ? "&trace=1" : "";
+    const { ok, data } = await apiFetch(`/api/instances/${activeLogInstanceId}/logs?tail=300${traceParam}`);
     if (ok && data.ok) {
       const atBottom = viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight < 40;
-      viewer.textContent = data.logs || "（暂无输出）";
+      viewer.textContent = data.logs || "（暂无关键日志输出）";
       if (atBottom) viewer.scrollTop = viewer.scrollHeight;
     }
   };
 
+  traceToggle.onchange = pullLogs;
   await pullLogs();
   if (logPollTimer) clearInterval(logPollTimer);
   logPollTimer = setInterval(pullLogs, 2000);
