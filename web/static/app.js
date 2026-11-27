@@ -168,8 +168,121 @@ function renderInstances(items) {
         ? `${chDone}/${chTotal}${prog.current_chapter ? ` · ${prog.current_chapter}` : ""}`
         : prog.current_chapter || "-";
 
-      const job = prog.current_job;
-      const jobText = job ? `${job.name || job.type} (${job.detail || `${job.percent}%`})` : "-";
+      const courseItems =
+        Array.isArray(prog.courses) && prog.courses.length
+          ? prog.courses
+          : (inst.courses || []).map((cid, idx) => ({
+              id: String(cid),
+              title: (inst.course_titles && inst.course_titles[String(cid)]) || `课程 ${cid}`,
+              index: idx + 1,
+              status: inst.runtime_status === "completed" ? "completed" : "pending",
+              chapters_total: 0,
+              chapters_completed: 0,
+              percent: inst.runtime_status === "completed" ? 100 : 0,
+            }));
+
+      const courseRowsHtml = courseItems
+        .map((c) => {
+          const st = c.status || "pending";
+          const dotCls =
+            st === "completed"
+              ? "dot-ok"
+              : st === "running"
+                ? "dot-run"
+                : st === "error"
+                  ? "dot-err"
+                  : "dot-wait";
+          const cPct = Number(c.percent || 0).toFixed(0);
+          let metaText = "待学习";
+          if (c.chapters_total > 0) {
+            metaText = `${c.chapters_completed || 0}/${c.chapters_total}章 · ${cPct}%`;
+          } else if (st === "completed") {
+            metaText = "已完成";
+          } else if (st === "stopped") {
+            metaText = "已暂停";
+          } else if (st === "error") {
+            metaText = "异常";
+          }
+          return `
+            <div class="course-mini-row ${st === "running" ? "is-active" : ""}">
+              <span class="course-dot ${dotCls}"></span>
+              <span class="course-mini-name" title="${escapeHtml(c.title || c.id)}">${escapeHtml(c.title || c.id)}</span>
+              <span class="course-mini-meta">${escapeHtml(metaText)}</span>
+            </div>
+          `;
+        })
+        .join("");
+
+      const courseListHtml = courseItems.length
+        ? `
+          <div class="course-mini-list">
+            <div class="mini-section-head">
+              <span>课程列表 (${courseItems.length})</span>
+              <span>${prog.courses_completed || 0}/${courseItems.length} 已完成</span>
+            </div>
+            <div class="course-mini-items">${courseRowsHtml}</div>
+          </div>
+        `
+        : "";
+
+      const rawJobs = Array.isArray(prog.active_jobs) ? prog.active_jobs : [];
+      const activeJobs = isRunning
+        ? rawJobs.length
+          ? rawJobs
+          : prog.current_job
+            ? [prog.current_job]
+            : []
+        : [];
+      const jobTypeMap = { video: "视频", work: "答题", document: "文档", read: "阅读" };
+
+      const activeJobsHtml = isRunning
+        ? activeJobs.length
+          ? `
+            <div class="active-jobs-box">
+              <div class="mini-section-head">
+                <span>并行任务点 (${activeJobs.length})</span>
+                <span>实时状态</span>
+              </div>
+              <div class="active-jobs-list">
+                ${activeJobs
+                  .map((j) => {
+                    const jType = j.type || "job";
+                    const typeLabel = jobTypeMap[jType] || jType;
+                    const badgeCls =
+                      jType === "video"
+                        ? "job-badge-video"
+                        : jType === "work"
+                          ? "job-badge-work"
+                          : "job-badge-other";
+                    const jPct = Math.min(100, Math.max(0, Number(j.percent || 0)));
+                    const stText = j.status ? `${j.status} · ` : "";
+                    const detailText = `${stText}${j.detail || `${jPct.toFixed(0)}%`}`;
+                    return `
+                      <div class="active-job-row">
+                        <div class="active-job-top">
+                          <span class="job-badge ${badgeCls}">${escapeHtml(typeLabel)}</span>
+                          <span class="active-job-name" title="${escapeHtml(j.name || typeLabel)}">${escapeHtml(j.name || typeLabel)}</span>
+                          <span class="active-job-detail">${escapeHtml(detailText)}</span>
+                        </div>
+                        <div class="job-mini-bar">
+                          <div class="job-mini-fill ${jType === "work" ? "is-work" : ""}" style="width: ${jPct}%"></div>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join("")}
+              </div>
+            </div>
+          `
+          : `
+            <div class="active-jobs-box is-idle">
+              <div class="mini-section-head">
+                <span>并行任务点 (0)</span>
+                <span>准备章节中...</span>
+              </div>
+            </div>
+          `
+        : "";
 
       const resChip = isRunning
         ? `<span class="chip chip-neutral">CPU ${inst.cpu_percent}% · ${inst.mem_mb} MB</span>`
@@ -196,10 +309,12 @@ function renderInstances(items) {
           </div>
 
           <div class="inst-details">
-            <div>课程：<strong>${escapeHtml(curCourse)}</strong></div>
-            <div>章节：<strong>${escapeHtml(curChapter)}</strong></div>
-            <div>任务点：<strong>${escapeHtml(jobText)}</strong></div>
+            <div>当前课程：<strong>${escapeHtml(curCourse)}</strong></div>
+            <div>当前章节：<strong>${escapeHtml(curChapter)}</strong></div>
           </div>
+
+          ${courseListHtml}
+          ${activeJobsHtml}
 
           <div class="inst-tags">
             <span class="chip chip-neutral">${escapeHtml(inst.api_profile_name)}</span>

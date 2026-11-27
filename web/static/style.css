@@ -164,6 +164,67 @@ code {
 }
 .inst-details strong { color: var(--text); font-weight: 500; }
 
+.mini-section-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 0.76rem; font-weight: 500; color: var(--text-secondary); margin-bottom: 6px;
+}
+
+.course-mini-list {
+  background: var(--bg); border: 1px solid var(--border-light); border-radius: 12px; padding: 9px 11px;
+}
+.course-mini-items {
+  display: flex; flex-direction: column; gap: 5px; max-height: 132px; overflow-y: auto; padding-right: 2px;
+}
+.course-mini-row {
+  display: flex; align-items: center; gap: 7px; font-size: 0.8rem; color: var(--text-secondary);
+}
+.course-mini-row.is-active { color: var(--text); font-weight: 500; }
+.course-mini-name {
+  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.course-mini-meta { flex-shrink: 0; font-size: 0.74rem; color: var(--text-secondary); }
+.course-mini-row.is-active .course-mini-meta { color: var(--primary); }
+
+.course-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot-ok { background: var(--ok); }
+.dot-run { background: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.dot-err { background: var(--danger); }
+.dot-wait { background: var(--border); }
+
+.active-jobs-box {
+  background: var(--primary-soft); border: 1px solid #d2e3fc; border-radius: 12px; padding: 9px 11px;
+}
+.active-jobs-box.is-idle { background: var(--surface-variant); border-color: var(--border-light); }
+.active-jobs-box.is-idle .mini-section-head { margin-bottom: 0; }
+.active-jobs-list {
+  display: flex; flex-direction: column; gap: 7px; max-height: 168px; overflow-y: auto; padding-right: 2px;
+}
+.active-job-row {
+  background: var(--surface); border-radius: 8px; padding: 6px 8px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.active-job-top { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; }
+.active-job-name {
+  flex: 1; min-width: 0; color: var(--text); font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.active-job-detail { flex-shrink: 0; font-size: 0.74rem; color: var(--text-secondary); }
+
+.job-badge {
+  flex-shrink: 0; padding: 1px 6px; border-radius: 999px; font-size: 0.7rem; font-weight: 600;
+}
+.job-badge-video { background: var(--primary-soft); color: var(--primary); }
+.job-badge-work { background: var(--warn-soft); color: var(--warn); }
+.job-badge-other { background: var(--ok-soft); color: var(--ok); }
+
+.job-mini-bar {
+  width: 100%; height: 4px; border-radius: 999px; background: var(--surface-variant); overflow: hidden;
+}
+.job-mini-fill {
+  height: 100%; border-radius: 999px; background: var(--primary); transition: width 0.3s ease;
+}
+.job-mini-fill.is-work { background: var(--warn); }
+
 .api-meta { font-size: 0.83rem; color: var(--text-secondary); display: flex; flex-direction: column; gap: 4px; word-break: break-all; }
 .inst-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .card-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }

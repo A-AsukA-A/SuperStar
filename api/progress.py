@@ -26,6 +26,7 @@ class ProgressReporter:
         self.write_interval = write_interval
         self._lock = threading.RLock()
         self._last_write_ts = 0.0
+        self._active_jobs: dict[str, dict[str, Any]] = {}
         now = int(time.time())
         self._state: dict[str, Any] = {
             "status": "starting",
@@ -33,12 +34,14 @@ class ProgressReporter:
             "overall_percent": 0.0,
             "courses_total": 0,
             "courses_completed": 0,
+            "courses": [],
             "current_course": None,
             "chapters_total": 0,
             "chapters_completed": 0,
             "chapters_failed": 0,
             "current_chapter": "",
             "current_job": None,
+            "active_jobs": [],
             "started_at": now,
             "updated_at": now,
         }
@@ -48,6 +51,17 @@ class ProgressReporter:
     @property
     def enabled(self) -> bool:
         return bool(self.status_file)
+
+    def _find_course_entry(self, course_id: str, index: int | None = None) -> dict[str, Any] | None:
+        courses = self._state.get("courses") or []
+        if index is not None:
+            for item in courses:
+                if item.get("index") == index and item.get("id") == course_id:
+                    return item
+        for item in courses:
+            if item.get("id") == course_id:
+                return item
+        return None
 
     def _recompute_percent(self) -> None:
         status = self._state["status"]
@@ -65,10 +79,28 @@ class ProgressReporter:
         ch_done = int(self._state.get("chapters_completed") or 0)
         ch_frac = 0.0
         if ch_total > 0:
-            job = self._state.get("current_job") or {}
-            job_pct = float(job.get("percent") or 0.0) / 100.0
-            job_contrib = (min(1.0, max(0.0, job_pct)) / ch_total) if ch_done < ch_total else 0.0
+            jobs = list(self._active_jobs.values())
+            if not jobs and self._state.get("current_job"):
+                jobs = [self._state["current_job"]]
+            active_frac = sum(
+                min(1.0, max(0.0, float(j.get("percent") or 0.0) / 100.0))
+                for j in jobs
+            )
+            remaining_ch = max(0, ch_total - ch_done)
+            job_contrib = (min(float(remaining_ch), active_frac) / ch_total) if remaining_ch > 0 else 0.0
             ch_frac = min(1.0, (ch_done / ch_total) + job_contrib)
+
+        cur_course = self._state.get("current_course")
+        if cur_course:
+            c_entry = self._find_course_entry(str(cur_course.get("id", "")), cur_course.get("index"))
+            if c_entry is not None and c_entry.get("status") == "running":
+                c_entry["chapters_total"] = ch_total
+                c_entry["chapters_completed"] = ch_done
+                c_entry["chapters_failed"] = int(self._state.get("chapters_failed") or 0)
+                c_pct = round(ch_frac * 100.0, 1)
+                if status == "running":
+                    c_pct = min(99.9, c_pct)
+                c_entry["percent"] = max(0.0, min(100.0, c_pct))
 
         raw_pct = ((c_done + ch_frac) / c_total) * 100.0
         if status == "running":
@@ -83,8 +115,10 @@ class ProgressReporter:
             return
 
         self._state["updated_at"] = int(now)
+        self._state["active_jobs"] = [dict(j) for j in self._active_jobs.values()]
         self._recompute_percent()
         payload = dict(self._state)
+        payload["courses"] = [dict(c) for c in (self._state.get("courses") or [])]
 
         parent = os.path.dirname(os.path.abspath(self.status_file))
         if parent:
@@ -119,6 +153,19 @@ class ProgressReporter:
             self._state["status"] = "running"
             self._state["courses_total"] = len(courses)
             self._state["courses_completed"] = 0
+            self._state["courses"] = [
+                {
+                    "id": str(c.get("courseId", "")),
+                    "title": str(c.get("title", "")),
+                    "index": idx,
+                    "status": "pending",
+                    "chapters_total": 0,
+                    "chapters_completed": 0,
+                    "chapters_failed": 0,
+                    "percent": 0.0,
+                }
+                for idx, c in enumerate(courses, 1)
+            ]
             self._state["message"] = f"已加载 {len(courses)} 门待学习课程"
             self._flush(force=True)
 
@@ -134,25 +181,49 @@ class ProgressReporter:
         with self._lock:
             total = max(0, int(total_chapters))
             done = max(0, min(int(initial_completed), total))
+            cid = str(course.get("courseId", ""))
+            title = str(course.get("title", ""))
             self._state["status"] = "running"
             self._state["current_course"] = {
-                "id": str(course.get("courseId", "")),
-                "title": str(course.get("title", "")),
+                "id": cid,
+                "title": title,
                 "index": index,
             }
             self._state["chapters_total"] = total
             self._state["chapters_completed"] = done
             self._state["chapters_failed"] = 0
             self._state["current_chapter"] = ""
+            self._active_jobs.clear()
             self._state["current_job"] = None
+
+            c_entry = self._find_course_entry(cid, index)
+            if c_entry is None:
+                c_entry = {
+                    "id": cid,
+                    "title": title,
+                    "index": index,
+                    "status": "running",
+                    "chapters_total": total,
+                    "chapters_completed": done,
+                    "chapters_failed": 0,
+                    "percent": 0.0,
+                }
+                self._state.setdefault("courses", []).append(c_entry)
+            else:
+                c_entry["status"] = "running"
+                c_entry["chapters_total"] = total
+                c_entry["chapters_completed"] = done
+                c_entry["chapters_failed"] = 0
+                c_entry["percent"] = round((done / total) * 100.0, 1) if total > 0 else 0.0
+
             pending = total - done
             if done > 0:
                 self._state["message"] = (
-                    f"课程 {index}/{self._state['courses_total']} ({course.get('title', '')})："
+                    f"课程 {index}/{self._state['courses_total']} ({title})："
                     f"已完成 {done} 章，待处理 {pending} 章"
                 )
             else:
-                self._state["message"] = f"正在学习课程 {index}/{self._state['courses_total']}: {course.get('title', '')}"
+                self._state["message"] = f"正在学习课程 {index}/{self._state['courses_total']}: {title}"
             self._flush(force=True)
 
     def chapter_started(self, title: str) -> None:
@@ -160,7 +231,6 @@ class ProgressReporter:
             return
         with self._lock:
             self._state["current_chapter"] = str(title or "")
-            self._state["current_job"] = None
             self._state["message"] = f"正在处理章节: {title}"
             self._flush(force=True)
 
@@ -171,7 +241,6 @@ class ProgressReporter:
             self._state["chapters_completed"] = int(self._state.get("chapters_completed") or 0) + 1
             if not success and not skipped:
                 self._state["chapters_failed"] = int(self._state.get("chapters_failed") or 0) + 1
-            self._state["current_job"] = None
             status_word = "已跳过" if skipped else ("已完成" if success else "失败")
             self._state["message"] = f"章节{status_word}: {title}"
             self._flush(force=True)
@@ -184,6 +253,8 @@ class ProgressReporter:
         total: int | float,
         detail: str | None = None,
         force: bool = False,
+        job_key: str | None = None,
+        status_text: str | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -191,19 +262,46 @@ class ProgressReporter:
             pct = 0.0
             if total and total > 0:
                 pct = round(max(0.0, min(100.0, (float(current) / float(total)) * 100.0)), 1)
-            self._state["current_job"] = {
-                "type": job_type,
+            key = str(job_key or f"{job_type}:{name}")
+            entry = {
+                "key": key,
+                "type": str(job_type or ""),
                 "name": str(name or ""),
+                "status": str(status_text or ""),
                 "percent": pct,
-                "detail": detail or f"{current}/{total}",
+                "detail": detail if detail is not None else f"{current}/{total}",
+                "updated_at": int(time.time()),
             }
+            self._active_jobs[key] = entry
+            self._state["current_job"] = entry
             self._flush(force=force)
+
+    def finish_job(self, job_key: str) -> None:
+        if not self.enabled or not job_key:
+            return
+        with self._lock:
+            removed = self._active_jobs.pop(str(job_key), None)
+            if removed is not None:
+                remaining = list(self._active_jobs.values())
+                self._state["current_job"] = remaining[-1] if remaining else None
+                self._flush(force=True)
 
     def finish_course(self) -> None:
         if not self.enabled:
             return
         with self._lock:
             self._state["courses_completed"] = int(self._state.get("courses_completed") or 0) + 1
+            cur_course = self._state.get("current_course")
+            if cur_course:
+                c_entry = self._find_course_entry(str(cur_course.get("id", "")), cur_course.get("index"))
+                if c_entry is not None:
+                    c_entry["status"] = "completed"
+                    c_entry["chapters_completed"] = max(
+                        int(c_entry.get("chapters_completed") or 0),
+                        int(c_entry.get("chapters_total") or 0),
+                    )
+                    c_entry["percent"] = 100.0
+            self._active_jobs.clear()
             self._state["current_job"] = None
             self._flush(force=True)
 
@@ -213,7 +311,15 @@ class ProgressReporter:
         with self._lock:
             c_total = int(self._state.get("courses_total") or 0)
             self._state["courses_completed"] = c_total
+            for c_entry in self._state.get("courses") or []:
+                c_entry["status"] = "completed"
+                c_entry["chapters_completed"] = max(
+                    int(c_entry.get("chapters_completed") or 0),
+                    int(c_entry.get("chapters_total") or 0),
+                )
+                c_entry["percent"] = 100.0
             self._state["status"] = "completed"
+            self._active_jobs.clear()
             self._state["current_job"] = None
             self._state["message"] = "所有课程学习任务已完成"
             self._flush(force=True)
@@ -224,7 +330,12 @@ class ProgressReporter:
         with self._lock:
             if self._state.get("status") == "completed":
                 return
+            for c_entry in self._state.get("courses") or []:
+                if c_entry.get("status") == "running":
+                    c_entry["status"] = "stopped"
             self._state["status"] = "stopped"
+            self._active_jobs.clear()
+            self._state["current_job"] = None
             self._state["message"] = message
             self._flush(force=True)
 
@@ -232,6 +343,11 @@ class ProgressReporter:
         if not self.enabled:
             return
         with self._lock:
+            for c_entry in self._state.get("courses") or []:
+                if c_entry.get("status") == "running":
+                    c_entry["status"] = "error"
             self._state["status"] = "error"
+            self._active_jobs.clear()
+            self._state["current_job"] = None
             self._state["message"] = str(message)
             self._flush(force=True)

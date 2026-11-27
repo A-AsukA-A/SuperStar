@@ -231,12 +231,14 @@ class InstanceManager:
             "overall_percent": 0.0,
             "courses_total": len(meta.get("courses") or []),
             "courses_completed": 0,
+            "courses": [],
             "current_course": None,
             "chapters_total": 0,
             "chapters_completed": 0,
             "chapters_failed": 0,
             "current_chapter": "",
             "current_job": None,
+            "active_jobs": [],
         }
 
         cpu_percent = 0.0
@@ -260,6 +262,34 @@ class InstanceManager:
             progress["status"] = runtime_status
             if runtime_status == "stopped":
                 progress["message"] = "任务已停止"
+
+        if runtime_status != "running":
+            progress["active_jobs"] = []
+            progress["current_job"] = None
+            for c_item in progress.get("courses") or []:
+                if c_item.get("status") == "running":
+                    c_item["status"] = runtime_status
+
+        course_ids = meta.get("courses") or []
+        course_titles = meta.get("course_titles") or {}
+        if not progress.get("courses") and course_ids:
+            default_status = "completed" if runtime_status == "completed" else "pending"
+            default_pct = 100.0 if default_status == "completed" else 0.0
+            progress["courses"] = [
+                {
+                    "id": str(cid),
+                    "title": str(course_titles.get(str(cid), f"课程 {cid}")),
+                    "index": idx,
+                    "status": default_status,
+                    "chapters_total": 0,
+                    "chapters_completed": 0,
+                    "chapters_failed": 0,
+                    "percent": default_pct,
+                }
+                for idx, cid in enumerate(course_ids, 1)
+            ]
+        if "active_jobs" not in progress or progress["active_jobs"] is None:
+            progress["active_jobs"] = []
 
         return {
             "id": instance_id,

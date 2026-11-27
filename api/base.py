@@ -559,14 +559,18 @@ class Chaoxing:
             wait_time = min(wait_time, 30)
 
         logger.info(f"开始任务: {_job['name']}, 总时长: {duration}s, 已进行: {play_time}s, 倍速: {_speed}x")
+        job_key = f"video:{_course.get('courseId', '')}:{_job.get('jobid', _job.get('name', ''))}"
+        job_name = str(_job.get("name") or "视频")
         if self.progress_reporter:
             self.progress_reporter.update_job(
                 "video",
-                _job.get("name", "视频"),
+                job_name,
                 int(play_time),
                 duration,
                 f"{format_sec(play_time)} / {format_sec(duration)}",
                 force=True,
+                job_key=job_key,
+                status_text="播放中",
             )
 
         pbar = tqdm(total=duration, initial=play_time, desc=_job["name"],
@@ -575,79 +579,94 @@ class Chaoxing:
         forbidden_retry = 0
         max_forbidden_retry = 2
 
-        passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, duration,
-                                                _type, headers=headers, _isdrag=4)
-        if passed:
-            if self.progress_reporter:
-                self.progress_reporter.update_job(
-                    "video", _job.get("name", "视频"), duration, duration, "瞬间完成", force=True
-                )
-            logger.info("任务瞬间完成: {}", _job['name'])
-            return StudyResult.SUCCESS
-
-        while not passed:
-            # Sometimes the last request needs to be sent several times to complete the task
-            if play_time - last_log_time >= wait_time or play_time == duration:
-
-                passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration,
-                                                        int(play_time), _type, headers=headers)
-
-                if state == 403:
-                    if forbidden_retry >= max_forbidden_retry:
-                        logger.warning("403重试失败, 跳过当前任务")
-                        return StudyResult.FORBIDDEN
-                    forbidden_retry += 1
-                    logger.warning(
-                        "出现403报错, 正在尝试刷新会话状态 (第{}次)",
-                        forbidden_retry,
+        try:
+            passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, duration,
+                                                    _type, headers=headers, _isdrag=4)
+            if passed:
+                if self.progress_reporter:
+                    self.progress_reporter.update_job(
+                        "video",
+                        job_name,
+                        duration,
+                        duration,
+                        "瞬间完成",
+                        force=True,
+                        job_key=job_key,
+                        status_text="播放完成",
                     )
-                    time.sleep(random.uniform(2, 4))
-                    refreshed_meta = self._recover_after_forbidden(_session, _job, _type)
-                    if refreshed_meta:
-                        # FIXME: if those keys aren't present, it should be considered an error rather than falling back
-                        _dtoken = refreshed_meta.get("dtoken", _dtoken)
-                        _duration = refreshed_meta.get("duration", duration)
-                        play_time = refreshed_meta.get("playTime", play_time)
+                logger.info("任务瞬间完成: {}", _job['name'])
+                return StudyResult.SUCCESS
 
-                        logger.debug("Refreshed token: {}, duration: {}, play time: {}", _dtoken, _duration, play_time)
-                        continue
+            while not passed:
+                # Sometimes the last request needs to be sent several times to complete the task
+                if play_time - last_log_time >= wait_time or play_time == duration:
 
-                elif not passed and state != 200:
-                    return StudyResult.ERROR
+                    passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration,
+                                                            int(play_time), _type, headers=headers)
 
-                wait_time = int(random.uniform(30, 90))
-                last_log_time = play_time
+                    if state == 403:
+                        if forbidden_retry >= max_forbidden_retry:
+                            logger.warning("403重试失败, 跳过当前任务")
+                            return StudyResult.FORBIDDEN
+                        forbidden_retry += 1
+                        logger.warning(
+                            "出现403报错, 正在尝试刷新会话状态 (第{}次)",
+                            forbidden_retry,
+                        )
+                        time.sleep(random.uniform(2, 4))
+                        refreshed_meta = self._recover_after_forbidden(_session, _job, _type)
+                        if refreshed_meta:
+                            # FIXME: if those keys aren't present, it should be considered an error rather than falling back
+                            _dtoken = refreshed_meta.get("dtoken", _dtoken)
+                            _duration = refreshed_meta.get("duration", duration)
+                            play_time = refreshed_meta.get("playTime", play_time)
 
-                logger.trace("Progress logged")
+                            logger.debug("Refreshed token: {}, duration: {}, play time: {}", _dtoken, _duration, play_time)
+                            continue
 
-            # Uploading the progress takes time, we assume that the video is still playing in the background, this manually calculates the time elapsed
-            dt = (time.time() - last_iter) * _speed
-            last_iter = time.time()
-            play_time = min(duration, play_time + dt)
+                    elif not passed and state != 200:
+                        return StudyResult.ERROR
 
-            pbar.n = int(play_time)
-            pbar.refresh()
+                    wait_time = int(random.uniform(30, 90))
+                    last_log_time = play_time
+
+                    logger.trace("Progress logged")
+
+                # Uploading the progress takes time, we assume that the video is still playing in the background, this manually calculates the time elapsed
+                dt = (time.time() - last_iter) * _speed
+                last_iter = time.time()
+                play_time = min(duration, play_time + dt)
+
+                pbar.n = int(play_time)
+                pbar.refresh()
+                if self.progress_reporter:
+                    self.progress_reporter.update_job(
+                        "video",
+                        job_name,
+                        int(play_time),
+                        duration,
+                        f"{format_sec(play_time)} / {format_sec(duration)}",
+                        job_key=job_key,
+                        status_text="播放中",
+                    )
+                time.sleep(gc.THRESHOLD)
+
             if self.progress_reporter:
                 self.progress_reporter.update_job(
                     "video",
-                    _job.get("name", "视频"),
-                    int(play_time),
+                    job_name,
                     duration,
-                    f"{format_sec(play_time)} / {format_sec(duration)}",
+                    duration,
+                    f"{format_sec(duration)} / {format_sec(duration)}",
+                    force=True,
+                    job_key=job_key,
+                    status_text="播放完成",
                 )
-            time.sleep(gc.THRESHOLD)
-
-        if self.progress_reporter:
-            self.progress_reporter.update_job(
-                "video",
-                _job.get("name", "视频"),
-                duration,
-                duration,
-                f"{format_sec(duration)} / {format_sec(duration)}",
-                force=True,
-            )
-        logger.info("任务完成: {}", _job['name'])
-        return StudyResult.SUCCESS
+            logger.info("任务完成: {}", _job['name'])
+            return StudyResult.SUCCESS
+        finally:
+            if self.progress_reporter:
+                self.progress_reporter.finish_job(job_key)
 
     def study_document(self, _course, _job) -> StudyResult:
         """
@@ -674,16 +693,28 @@ class Chaoxing:
             - re module for regular expression matching
         """
         _session = SessionManager.get_session()
+        job_key = f"document:{_course.get('courseId', '')}:{_job.get('jobid', _job.get('name', ''))}"
         if self.progress_reporter:
             self.progress_reporter.update_job(
-                "document", str(_job.get("name") or _job.get("jobid") or "文档"), 1, 1, "处理中", force=True
+                "document",
+                str(_job.get("name") or _job.get("jobid") or "文档"),
+                1,
+                1,
+                "处理中",
+                force=True,
+                job_key=job_key,
+                status_text="处理中",
             )
-        _url = f"https://mooc1.chaoxing.com/ananas/job/document?jobid={_job['jobid']}&knowledgeid={re.findall(r'nodeId_(.*?)-', _job['otherinfo'])[0]}&courseid={_course['courseId']}&clazzid={_course['clazzId']}&jtoken={_job['jtoken']}&_dc={get_timestamp()}"
-        _resp = _session.get(_url)
-        if _resp.status_code != 200:
-            return StudyResult.ERROR
-        else:
-            return StudyResult.SUCCESS
+        try:
+            _url = f"https://mooc1.chaoxing.com/ananas/job/document?jobid={_job['jobid']}&knowledgeid={re.findall(r'nodeId_(.*?)-', _job['otherinfo'])[0]}&courseid={_course['courseId']}&clazzid={_course['clazzId']}&jtoken={_job['jtoken']}&_dc={get_timestamp()}"
+            _resp = _session.get(_url)
+            if _resp.status_code != 200:
+                return StudyResult.ERROR
+            else:
+                return StudyResult.SUCCESS
+        finally:
+            if self.progress_reporter:
+                self.progress_reporter.finish_job(job_key)
 
     def _record_failed_work(self, course_title, work_title, work_key, questions_list, path="未通过测验记录.md"):
         """把提交后仍未及格的测验记录到文件，供用户手工处理"""
@@ -1002,186 +1033,220 @@ class Chaoxing:
         # 搜题
         total_questions = len(questions["questions"])
         found_answers = 0
-        for q_idx, q in enumerate(questions["questions"], 1):
-            if self.progress_reporter:
-                self.progress_reporter.update_job(
-                    "work",
-                    _work_title or str(_job.get("jobid", "测验")),
-                    q_idx,
-                    total_questions,
-                    f"第 {q_idx}/{total_questions} 题",
+        work_label = _work_title or str(_job.get("name") or _job.get("jobid") or "测验")
+        job_key = f"work:{_course.get('courseId', '')}:{_job.get('jobid', work_label)}"
+        try:
+            for q_idx, q in enumerate(questions["questions"], 1):
+                if self.progress_reporter:
+                    self.progress_reporter.update_job(
+                        "work",
+                        work_label,
+                        q_idx,
+                        total_questions,
+                        f"第 {q_idx}/{total_questions} 题",
+                        force=(q_idx == 1),
+                        job_key=job_key,
+                        status_text="答题中",
+                    )
+                logger.debug(f"当前题目信息 -> {q}")
+                # 添加搜题延迟 #428 - 默认0s延迟
+                query_delay = self.kwargs.get("query_delay", 0)
+                time.sleep(query_delay)
+                res = self.tiku.query(
+                    q,
+                    course_id=str(_course.get("courseId", "")),
+                    course_title=str(_course.get("title", "")),
                 )
-            logger.debug(f"当前题目信息 -> {q}")
-            # 添加搜题延迟 #428 - 默认0s延迟
-            query_delay = self.kwargs.get("query_delay", 0)
-            time.sleep(query_delay)
-            res = self.tiku.query(
-                q,
-                course_id=str(_course.get("courseId", "")),
-                course_title=str(_course.get("title", "")),
-            )
-            answer = ""
-            if not res:
-                # 随机答题
-                answer = random_answer(q["options"])
-                q[f'answerSource{q["id"]}'] = "random"
-            else:
-                # 根据响应结果选择答案
-                # 新增：题库/模型直接返回选项字母（如 B / AC）时优先采用
-                _letters = res.strip() if isinstance(res, str) else ""
-                if q["type"] in ("single", "multiple") and re.fullmatch(r"[A-Ha-h]{1,8}", _letters):
-                    answer = _letters.upper()
-                elif q["type"] == "multiple":
-                    # 多选处理
-                    options_list = multi_cut(q["options"])
-                    res_list = multi_cut(res)
-                    if res_list is not None and options_list is not None:
-                        for _a in clean_res(res_list):
-                            matched = False
-                            for o in options_list:
-                                if (
-                                        is_subsequence(_a, o)  # 去掉各种符号和前面ABCD的答案应当是选项的子序列
-                                ):
-                                    answer += o[:1]
-                                    matched = True
-                                    break # 找到匹配项后立即停止，防止重复添加
-                            if not matched:
-                                best_letter = best_option_by_similarity(_a, options_list, threshold=0.8)
-                                if best_letter:
-                                    answer += best_letter
-                        # 对答案进行排序, 否则会提交失败
-                        answer = "".join(sorted(set(answer)))
-                    # else 如果分割失败那么就直接到下面去随机选
-                elif q["type"] == "single":
-                    # 单选也进行切割，主要是防止返回的答案有异常字符
-                    options_list = multi_cut(q["options"])
-                    if options_list is not None:
-                        t_res = clean_res(res)
-                        for o in options_list:
-                            if is_subsequence(t_res[0], o):
-                                answer = o[:1]
-                                break
-                        if not answer and t_res:
-                            answer = best_option_by_similarity(t_res[0], options_list, threshold=0.8)
-                elif q["type"] == "judgement":
-                    answer = "true" if self.tiku.judgement_select(res) else "false"
-                elif q["type"] == "completion":
-                    if isinstance(res, list):
-                        answer = "".join(res)
-                    elif isinstance(res, str):
-                        answer = res
-                else:
-                    # 其他类型直接使用答案 （目前仅知有简答题，待补充处理）
-                    answer = res
-
-                if not answer:  # 检查 answer 是否为空
-                    logger.warning(f"找到答案但答案未能匹配 -> {res}\t随机选择答案")
-                    answer = random_answer(q["options"])  # 如果为空，则随机选择答案
+                answer = ""
+                if not res:
+                    # 随机答题
+                    answer = random_answer(q["options"])
                     q[f'answerSource{q["id"]}'] = "random"
                 else:
-                    logger.info(f"成功获取到答案：{answer}")
-                    q[f'answerSource{q["id"]}'] = "cover"
-                    found_answers += 1
-            # 填充答案
-            q["answerField"][f'answer{q["id"]}'] = answer
-            logger.info(f'{q["title"]} 填写答案为 {answer}')
-        cover_rate = (found_answers / total_questions) * 100
-        logger.info(f"章节检测题库覆盖率： {cover_rate:.0f}%")
-        # 提交模式  现在与题库绑定,留空直接提交, 1保存但不提交
-        if self.tiku.get_submit_params() == "1":
-            questions["pyFlag"] = "1"
-        elif cover_rate >= self.tiku.COVER_RATE * 100 or self.rollback_times >= 1:
-            questions["pyFlag"] = ""
-        else:
-            questions["pyFlag"] = "1"
-            logger.info(f"章节检测题库覆盖率低于{self.tiku.COVER_RATE * 100:.0f}%，不予提交")
-        # 组建提交表单
-        if questions["pyFlag"] == "1":
-            for q in questions["questions"]:
-                questions.update(
-                    {
-                        f'answer{q["id"]}':
-                            q["answerField"][f'answer{q["id"]}'] if q[f'answerSource{q["id"]}'] == "cover" else '',
-                        f'answertype{q["id"]}': q["answerField"][f'answertype{q["id"]}'],
-                    }
-                )
-        else:
-            for q in questions["questions"]:
-                questions.update(
-                    {
-                        f'answer{q["id"]}': q["answerField"][f'answer{q["id"]}'],
-                        f'answertype{q["id"]}': q["answerField"][f'answertype{q["id"]}'],
-                    }
-                )
+                    # 根据响应结果选择答案
+                    # 新增：题库/模型直接返回选项字母（如 B / AC）时优先采用
+                    _letters = res.strip() if isinstance(res, str) else ""
+                    if q["type"] in ("single", "multiple") and re.fullmatch(r"[A-Ha-h]{1,8}", _letters):
+                        answer = _letters.upper()
+                    elif q["type"] == "multiple":
+                        # 多选处理
+                        options_list = multi_cut(q["options"])
+                        res_list = multi_cut(res)
+                        if res_list is not None and options_list is not None:
+                            for _a in clean_res(res_list):
+                                matched = False
+                                for o in options_list:
+                                    if (
+                                            is_subsequence(_a, o)  # 去掉各种符号和前面ABCD的答案应当是选项的子序列
+                                    ):
+                                        answer += o[:1]
+                                        matched = True
+                                        break # 找到匹配项后立即停止，防止重复添加
+                                if not matched:
+                                    best_letter = best_option_by_similarity(_a, options_list, threshold=0.8)
+                                    if best_letter:
+                                        answer += best_letter
+                            # 对答案进行排序, 否则会提交失败
+                            answer = "".join(sorted(set(answer)))
+                        # else 如果分割失败那么就直接到下面去随机选
+                    elif q["type"] == "single":
+                        # 单选也进行切割，主要是防止返回的答案有异常字符
+                        options_list = multi_cut(q["options"])
+                        if options_list is not None:
+                            t_res = clean_res(res)
+                            for o in options_list:
+                                if is_subsequence(t_res[0], o):
+                                    answer = o[:1]
+                                    break
+                            if not answer and t_res:
+                                answer = best_option_by_similarity(t_res[0], options_list, threshold=0.8)
+                    elif q["type"] == "judgement":
+                        answer = "true" if self.tiku.judgement_select(res) else "false"
+                    elif q["type"] == "completion":
+                        if isinstance(res, list):
+                            answer = "".join(res)
+                        elif isinstance(res, str):
+                            answer = res
+                    else:
+                        # 其他类型直接使用答案 （目前仅知有简答题，待补充处理）
+                        answer = res
 
-        del questions["questions"]
-
-        res = _session.post(
-            "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew",
-            data=questions,
-            headers={
-                "Host": "mooc1.chaoxing.com",
-                "sec-ch-ua-platform": '"Windows"',
-                "X-Requested-With": "XMLHttpRequest",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "sec-ch-ua": '"Microsoft Edge";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "sec-ch-ua-mobile": "?0",
-                "Origin": "https://mooc1.chaoxing.com",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
-                # "Referer": "https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=246831735&workAnswerId=52680423&workId=37778125&api=1&knowledgeid=913820156&classId=107515845&oldWorkId=07647c38d8de4c648a9277c5bed7075a&jobid=work-07647c38d8de4c648a9277c5bed7075a&type=&isphone=false&submit=false&enc=1d826aab06d44a1198fc983ed3d243b1&cpi=338350298&mooc2=1&skipHeader=true&originJobId=work-07647c38d8de4c648a9277c5bed7075a",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,ja;q=0.5",
-            },
-        )
-        if res.status_code == 200:
-            res_json = res.json()
-            if res_json["status"]:
-                logger.info(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题成功 -> {res_json["msg"]}')
-                if questions["pyFlag"] == "" and res_json.get("stuStatus") == 5:
-                    logger.warning("本次提交未达到及格线（stuStatus=5），任务点不会恢复，需要重做该测验")
-                    self._record_failed_work(
-                        str(_course.get("title", "")),
-                        _work_title or str(_job.get("jobid", "")),
-                        f'{_course.get("courseId")}-{_job.get("jobid")}',
-                        _question_list,
+                    if not answer:  # 检查 answer 是否为空
+                        logger.warning(f"找到答案但答案未能匹配 -> {res}\t随机选择答案")
+                        answer = random_answer(q["options"])  # 如果为空，则随机选择答案
+                        q[f'answerSource{q["id"]}'] = "random"
+                    else:
+                        logger.info(f"成功获取到答案：{answer}")
+                        q[f'answerSource{q["id"]}'] = "cover"
+                        found_answers += 1
+                # 填充答案
+                q["answerField"][f'answer{q["id"]}'] = answer
+                logger.info(f'{q["title"]} 填写答案为 {answer}')
+            cover_rate = (found_answers / total_questions) * 100
+            logger.info(f"章节检测题库覆盖率： {cover_rate:.0f}%")
+            # 提交模式  现在与题库绑定,留空直接提交, 1保存但不提交
+            if self.tiku.get_submit_params() == "1":
+                questions["pyFlag"] = "1"
+            elif cover_rate >= self.tiku.COVER_RATE * 100 or self.rollback_times >= 1:
+                questions["pyFlag"] = ""
+            else:
+                questions["pyFlag"] = "1"
+                logger.info(f"章节检测题库覆盖率低于{self.tiku.COVER_RATE * 100:.0f}%，不予提交")
+            # 组建提交表单
+            if questions["pyFlag"] == "1":
+                for q in questions["questions"]:
+                    questions.update(
+                        {
+                            f'answer{q["id"]}':
+                                q["answerField"][f'answer{q["id"]}'] if q[f'answerSource{q["id"]}'] == "cover" else '',
+                            f'answertype{q["id"]}': q["answerField"][f'answertype{q["id"]}'],
+                        }
                     )
             else:
-                logger.error(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题失败 -> {res_json["msg"]}')
+                for q in questions["questions"]:
+                    questions.update(
+                        {
+                            f'answer{q["id"]}': q["answerField"][f'answer{q["id"]}'],
+                            f'answertype{q["id"]}': q["answerField"][f'answertype{q["id"]}'],
+                        }
+                    )
+
+            del questions["questions"]
+
+            if self.progress_reporter:
+                submit_action = "提交中" if questions["pyFlag"] == "" else "保存中"
+                self.progress_reporter.update_job(
+                    "work",
+                    work_label,
+                    total_questions,
+                    total_questions,
+                    f"已完成 {total_questions} 题，{submit_action}",
+                    force=True,
+                    job_key=job_key,
+                    status_text=submit_action,
+                )
+
+            res = _session.post(
+                "https://mooc1.chaoxing.com/mooc-ans/work/addStudentWorkNew",
+                data=questions,
+                headers={
+                    "Host": "mooc1.chaoxing.com",
+                    "sec-ch-ua-platform": '"Windows"',
+                    "X-Requested-With": "XMLHttpRequest",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "sec-ch-ua": '"Microsoft Edge";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "sec-ch-ua-mobile": "?0",
+                    "Origin": "https://mooc1.chaoxing.com",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Dest": "empty",
+                    # "Referer": "https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew?courseId=246831735&workAnswerId=52680423&workId=37778125&api=1&knowledgeid=913820156&classId=107515845&oldWorkId=07647c38d8de4c648a9277c5bed7075a&jobid=work-07647c38d8de4c648a9277c5bed7075a&type=&isphone=false&submit=false&enc=1d826aab06d44a1198fc983ed3d243b1&cpi=338350298&mooc2=1&skipHeader=true&originJobId=work-07647c38d8de4c648a9277c5bed7075a",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,ja;q=0.5",
+                },
+            )
+            if res.status_code == 200:
+                res_json = res.json()
+                if res_json["status"]:
+                    logger.info(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题成功 -> {res_json["msg"]}')
+                    if questions["pyFlag"] == "" and res_json.get("stuStatus") == 5:
+                        logger.warning("本次提交未达到及格线（stuStatus=5），任务点不会恢复，需要重做该测验")
+                        self._record_failed_work(
+                            str(_course.get("title", "")),
+                            _work_title or str(_job.get("jobid", "")),
+                            f'{_course.get("courseId")}-{_job.get("jobid")}',
+                            _question_list,
+                        )
+                else:
+                    logger.error(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题失败 -> {res_json["msg"]}')
+                    return StudyResult.ERROR
+            else:
+                logger.error(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题失败 -> {res.text}')
                 return StudyResult.ERROR
-        else:
-            logger.error(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题失败 -> {res.text}')
-            return StudyResult.ERROR
-        return StudyResult.SUCCESS
+            return StudyResult.SUCCESS
+        finally:
+            if self.progress_reporter:
+                self.progress_reporter.finish_job(job_key)
 
     def study_read(self, _course, _job, _job_info) -> StudyResult:
         """
         阅读任务学习, 仅完成任务点, 并不增长时长
         """
         _session = SessionManager.get_session()
+        job_key = f"read:{_course.get('courseId', '')}:{_job.get('jobid', _job.get('name', ''))}"
         if self.progress_reporter:
             self.progress_reporter.update_job(
-                "read", str(_job.get("name") or _job.get("jobid") or "阅读"), 1, 1, "处理中", force=True
+                "read",
+                str(_job.get("name") or _job.get("jobid") or "阅读"),
+                1,
+                1,
+                "处理中",
+                force=True,
+                job_key=job_key,
+                status_text="处理中",
             )
-        _resp = _session.get(
-            url="https://mooc1.chaoxing.com/ananas/job/readv2",
-            params={
-                "jobid": _job["jobid"],
-                "knowledgeid": _job_info["knowledgeid"],
-                "jtoken": _job["jtoken"],
-                "courseid": _course["courseId"],
-                "clazzid": _course["clazzId"],
-            },
-        )
-        if _resp.status_code != 200:
-            logger.error(f"阅读任务学习失败 -> [{_resp.status_code}]{_resp.text}")
-            return StudyResult.ERROR
-        else:
-            _resp_json = _resp.json()
-            logger.info(f"阅读任务学习 -> {_resp_json['msg']}")
-            return StudyResult.SUCCESS
+        try:
+            _resp = _session.get(
+                url="https://mooc1.chaoxing.com/ananas/job/readv2",
+                params={
+                    "jobid": _job["jobid"],
+                    "knowledgeid": _job_info["knowledgeid"],
+                    "jtoken": _job["jtoken"],
+                    "courseid": _course["courseId"],
+                    "clazzid": _course["clazzId"],
+                },
+            )
+            if _resp.status_code != 200:
+                logger.error(f"阅读任务学习失败 -> [{_resp.status_code}]{_resp.text}")
+                return StudyResult.ERROR
+            else:
+                _resp_json = _resp.json()
+                logger.info(f"阅读任务学习 -> {_resp_json['msg']}")
+                return StudyResult.SUCCESS
+        finally:
+            if self.progress_reporter:
+                self.progress_reporter.finish_job(job_key)
 
     def study_emptypage(self, _course, point):
         _session = SessionManager.get_session()
