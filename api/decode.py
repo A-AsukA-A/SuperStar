@@ -9,7 +9,7 @@ import json
 import re
 from typing import List, Dict, Tuple, Any, Optional
 
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, Comment, NavigableString
 
 from api.font_decoder import FontDecoder
 from api.logger import logger
@@ -584,12 +584,15 @@ def _process_question(div_tag, font_decoder=None) -> Dict[str, Any]:
     # 解析题目和选项
     q_title = _extract_title(title_div, font_decoder)
     q_options = []
-    for idx, li in enumerate(options_list):
-        _text = _extract_choices(li, font_decoder)
-        # 选项没有 A/B/C/D 前缀时按 DOM 顺序补上，保证字母与页面显示一致
-        if not re.match(r'^[A-Za-z]\s*[.、:：)?）]', _text):
-            _text = f"{chr(65 + idx)}. {_text}"
-        q_options.append(_text)
+    if q_type not in ("shortanswer", "completion"):
+        for li in options_list:
+            _text = _extract_choices(li, font_decoder)
+            if not _text:
+                continue
+            # 选项没有 A/B/C/D 前缀时按实际有效选项顺序补上，保证字母与页面显示一致
+            if not re.match(r'^[A-Za-z]\s*[.、:：)?）]', _text):
+                _text = f"{chr(65 + len(q_options))}. {_text}"
+            q_options.append(_text)
     # 排序选项（此时都已带字母前缀，排序不会打乱顺序）
     q_options.sort()
     q_options = '\n'.join(q_options)
@@ -623,6 +626,20 @@ def _get_question_type(type_code: str) -> str:
     return "unknown"
 
 
+def _is_ignored_text_node(item, root) -> bool:
+    """过滤 HTML 注释及 <script>/<style>/<noscript> 内的非题目脚本文本。"""
+    if isinstance(item, Comment):
+        return True
+    parent = getattr(item, "parent", None)
+    while parent is not None:
+        if getattr(parent, "name", None) in ("script", "style", "noscript"):
+            return True
+        if parent is root:
+            break
+        parent = getattr(parent, "parent", None)
+    return False
+
+
 def _extract_title(element, font_decoder=None) -> str:
     """提取标题内容，支持解码加密字体"""
     if not element:
@@ -632,6 +649,8 @@ def _extract_title(element, font_decoder=None) -> str:
     content = []
     for item in element.descendants:
         if isinstance(item, NavigableString):
+            if _is_ignored_text_node(item, element):
+                continue
             content.append(item.string or "")
         elif item.name == "img":
             img_url = item.get("src", "")
@@ -655,6 +674,8 @@ def _extract_choices(element, font_decoder=None) -> str:
     parts = []
     for item in element.descendants:
         if isinstance(item, NavigableString):
+            if _is_ignored_text_node(item, element):
+                continue
             parts.append(str(item))
         elif item.name == "img":
             parts.append(f'<img src="{item.get("src", "")}">')

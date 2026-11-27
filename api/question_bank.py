@@ -31,10 +31,14 @@ def normalize_options(options: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+SUBJECTIVE_Q_TYPES = {"shortanswer", "completion"}
+
+
 def compute_question_hash(title: str, options: str, q_type: str) -> str:
+    clean_type = str(q_type or "").strip()
     norm_title = normalize_title(title)
-    norm_options = normalize_options(options)
-    raw = f"{norm_title}||{norm_options}||{str(q_type or '').strip()}"
+    norm_options = "" if clean_type in SUBJECTIVE_Q_TYPES else normalize_options(options)
+    raw = f"{norm_title}||{norm_options}||{clean_type}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -104,8 +108,33 @@ class QuestionBankDAO:
                     ON questions(course_id, updated_at DESC);
                 """
             )
+            self._cleanup_dirty_subjective_rows(conn)
             conn.commit()
             self._initialized = True
+
+    @staticmethod
+    def _cleanup_dirty_subjective_rows(conn: sqlite3.Connection) -> None:
+        dirty_rows = conn.execute(
+            "SELECT id, course_id, q_type, title, hit_count FROM questions "
+            "WHERE q_type IN ('shortanswer', 'completion') AND options != ''"
+        ).fetchall()
+        for row in dirty_rows:
+            new_hash = compute_question_hash(row["title"], "", row["q_type"])
+            dup = conn.execute(
+                "SELECT id FROM questions WHERE course_id = ? AND q_hash = ? AND id != ? LIMIT 1",
+                (row["course_id"], new_hash, row["id"]),
+            ).fetchone()
+            if dup:
+                conn.execute(
+                    "UPDATE questions SET hit_count = hit_count + ? WHERE id = ?",
+                    (int(row["hit_count"] or 0), dup["id"]),
+                )
+                conn.execute("DELETE FROM questions WHERE id = ?", (row["id"],))
+            else:
+                conn.execute(
+                    "UPDATE questions SET options = '', q_hash = ? WHERE id = ?",
+                    (new_hash, row["id"]),
+                )
 
     def lookup(
         self,
@@ -145,8 +174,10 @@ class QuestionBankDAO:
         self._ensure_schema()
         cid = str(course_id or "default").strip() or "default"
         ctitle = str(course_title or "").strip()
+        clean_type = str(q_type or "").strip()
         clean_title = normalize_title(title)
-        q_hash = compute_question_hash(title, options, q_type)
+        eff_options = "" if clean_type in SUBJECTIVE_Q_TYPES else str(options or "")
+        q_hash = compute_question_hash(title, eff_options, clean_type)
         now = int(time.time())
         with self._lock:
             conn = self._get_conn()
@@ -170,9 +201,9 @@ class QuestionBankDAO:
                     cid,
                     ctitle,
                     q_hash,
-                    str(q_type or ""),
+                    clean_type,
                     clean_title,
-                    str(options or ""),
+                    eff_options,
                     str(answer).strip(),
                     source,
                     now,
