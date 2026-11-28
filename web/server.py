@@ -541,12 +541,13 @@ def create_app() -> Flask:
     def list_bank_questions():
         course_id = request.args.get("course_id", "").strip() or None
         q = request.args.get("q", "").strip()
+        source = request.args.get("source", "").strip() or None
         try:
             limit = int(request.args.get("limit", 100))
             offset = int(request.args.get("offset", 0))
         except ValueError:
             limit, offset = 100, 0
-        return jsonify(question_bank.list_questions(course_id=course_id, query=q, limit=limit, offset=offset))
+        return jsonify(question_bank.list_questions(course_id=course_id, query=q, source=source, limit=limit, offset=offset))
 
     @app.put("/api/bank/questions/<int:qid>")
     def update_bank_question(qid: int):

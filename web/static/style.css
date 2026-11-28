@@ -354,6 +354,12 @@ code {
   min-width: 220px;
 }
 .toolbar-input:focus { border-color: var(--primary); }
+.toolbar-select {
+  padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 0.86rem; outline: none;
+  cursor: pointer;
+}
+.toolbar-select:focus { border-color: var(--primary); }
 
 .bank-courses {
   display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;
@@ -374,6 +380,10 @@ code {
 .bank-ans-row {
   display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
   background: var(--surface-variant); border-radius: 10px; padding: 8px 12px; font-size: 0.86rem;
+}
+.bank-wrong-row {
+  font-size: 0.8rem; color: var(--danger); background: var(--danger-soft);
+  border-radius: 8px; padding: 6px 10px; word-break: break-word;
 }
 
 .portal-course-list {

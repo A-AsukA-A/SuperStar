@@ -3,6 +3,7 @@
 
 from contextlib import closing
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -32,6 +33,45 @@ def normalize_options(options: str) -> str:
 
 
 SUBJECTIVE_Q_TYPES = {"shortanswer", "completion"}
+
+# 答案来源等级：AI(未验证) < verified(批阅确认正确) / manual(人工)；wrong 表示已知错误、不再命中
+SOURCE_AI = "AI"
+SOURCE_VERIFIED = "verified"
+SOURCE_MANUAL = "manual"
+SOURCE_WRONG = "wrong"
+TRUSTED_SOURCES = (SOURCE_VERIFIED, SOURCE_MANUAL)
+
+_TRUE_WORDS = {"正确", "对", "√", "✓", "是", "true", "t", "yes", "y", "1", "right"}
+_FALSE_WORDS = {"错误", "错", "×", "✗", "x", "否", "false", "f", "no", "n", "0", "wrong", "不对", "不正确"}
+
+
+def normalize_answer(answer: Any, q_type: str = "") -> str:
+    """把答案统一成可比较的规范形式：选择题→排序后的大写字母，判断题→正确/错误，其他→压缩空白后的文本。"""
+    text = str(answer or "").strip()
+    if not text:
+        return ""
+    clean_type = str(q_type or "").strip()
+    if clean_type in ("single", "multiple"):
+        compact = re.sub(r"[\s,，、;；|/]+", "", text)
+        if re.fullmatch(r"[A-Ha-h]{1,8}", compact):
+            return "".join(sorted(set(compact.upper())))
+        return re.sub(r"\s+", " ", text)
+    if clean_type == "judgement":
+        low = re.sub(r"\s+", "", text).lower()
+        if low in _TRUE_WORDS:
+            return "正确"
+        if low in _FALSE_WORDS:
+            return "错误"
+        return text
+    return re.sub(r"\s+", " ", text)
+
+
+def _load_wrong(raw: Any) -> list[str]:
+    try:
+        data = json.loads(raw) if raw else []
+        return [str(x) for x in data if str(x).strip()] if isinstance(data, list) else []
+    except Exception:
+        return []
 
 
 def compute_question_hash(title: str, options: str, q_type: str) -> str:
@@ -108,6 +148,9 @@ class QuestionBankDAO:
                     ON questions(course_id, updated_at DESC);
                 """
             )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(questions)").fetchall()}
+            if "wrong_answers" not in cols:
+                conn.execute("ALTER TABLE questions ADD COLUMN wrong_answers TEXT NOT NULL DEFAULT ''")
             self._cleanup_dirty_subjective_rows(conn)
             conn.commit()
             self._initialized = True
@@ -149,10 +192,10 @@ class QuestionBankDAO:
         with self._lock:
             conn = self._get_conn()
             row = conn.execute(
-                "SELECT id, answer FROM questions WHERE course_id = ? AND q_hash = ? LIMIT 1",
+                "SELECT id, answer, source FROM questions WHERE course_id = ? AND q_hash = ? LIMIT 1",
                 (cid, q_hash),
             ).fetchone()
-            if not row:
+            if not row or row["source"] == SOURCE_WRONG or not str(row["answer"] or "").strip():
                 return None
             conn.execute(
                 "UPDATE questions SET hit_count = hit_count + 1 WHERE id = ?",
@@ -189,12 +232,20 @@ class QuestionBankDAO:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 ON CONFLICT(course_id, q_hash) DO UPDATE SET
-                    answer = excluded.answer,
+                    answer = CASE
+                        WHEN questions.source IN ('verified', 'manual') AND excluded.source = 'AI'
+                            THEN questions.answer
+                        ELSE excluded.answer
+                    END,
                     course_title = CASE
                         WHEN excluded.course_title != '' THEN excluded.course_title
                         ELSE questions.course_title
                     END,
-                    source = excluded.source,
+                    source = CASE
+                        WHEN questions.source IN ('verified', 'manual') AND excluded.source = 'AI'
+                            THEN questions.source
+                        ELSE excluded.source
+                    END,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -212,6 +263,98 @@ class QuestionBankDAO:
             )
             conn.commit()
 
+    def _get_row(self, conn: sqlite3.Connection, cid: str, q_hash: str):
+        return conn.execute(
+            "SELECT id, answer, source, wrong_answers FROM questions WHERE course_id = ? AND q_hash = ? LIMIT 1",
+            (cid, q_hash),
+        ).fetchone()
+
+    def get_wrong_answers(self, course_id: str, title: str, options: str = "", q_type: str = "") -> list[str]:
+        """返回该题已被批阅判定为错误的答案列表（规范化形式）。"""
+        self._ensure_schema()
+        cid = str(course_id or "default").strip() or "default"
+        clean_type = str(q_type or "").strip()
+        eff_options = "" if clean_type in SUBJECTIVE_Q_TYPES else str(options or "")
+        q_hash = compute_question_hash(title, eff_options, clean_type)
+        with self._lock:
+            row = self._get_row(self._get_conn(), cid, q_hash)
+        return _load_wrong(row["wrong_answers"]) if row else []
+
+    def record_review(
+        self,
+        course_id: str,
+        course_title: str,
+        title: str,
+        options: str,
+        q_type: str,
+        correct_answer: str = "",
+        wrong_answer: str = "",
+    ) -> str:
+        """根据批阅结果更新题库。
+
+        - correct_answer 非空：写入为 verified（覆盖 AI / manual / wrong）。
+        - 只有 wrong_answer：把它加入错误列表；若当前存储答案就是它，则标记为 wrong（不再命中）。
+        返回动作：verified / corrected / wrong / noop。
+        """
+        self._ensure_schema()
+        cid = str(course_id or "default").strip() or "default"
+        ctitle = str(course_title or "").strip()
+        clean_type = str(q_type or "").strip()
+        clean_title = normalize_title(title)
+        eff_options = "" if clean_type in SUBJECTIVE_Q_TYPES else str(options or "")
+        q_hash = compute_question_hash(title, eff_options, clean_type)
+        correct = normalize_answer(correct_answer, clean_type)
+        wrong = normalize_answer(wrong_answer, clean_type)
+        if correct and wrong and correct == wrong:
+            wrong = ""
+        if not correct and not wrong:
+            return "noop"
+        now = int(time.time())
+        with self._lock:
+            conn = self._get_conn()
+            row = self._get_row(conn, cid, q_hash)
+            wrong_list = _load_wrong(row["wrong_answers"]) if row else []
+            if wrong and wrong not in wrong_list:
+                wrong_list.append(wrong)
+            if correct:
+                wrong_list = [w for w in wrong_list if w != correct]
+            wrong_json = json.dumps(wrong_list[-20:], ensure_ascii=False)
+
+            if correct:
+                old_norm = normalize_answer(row["answer"], clean_type) if row else ""
+                action = "verified" if (row and old_norm == correct) else "corrected"
+                new_answer, new_source = correct, SOURCE_VERIFIED
+            else:
+                old_answer = str(row["answer"]) if row else ""
+                old_source = str(row["source"]) if row else ""
+                if row and normalize_answer(old_answer, clean_type) == wrong:
+                    new_answer, new_source, action = old_answer, SOURCE_WRONG, "wrong"
+                elif row:
+                    # 存储答案与这次错误答案不同（比如这次是随机作答），保留原答案，仅记录错误项
+                    new_answer, new_source, action = old_answer, old_source, "wrong"
+                else:
+                    new_answer, new_source, action = wrong, SOURCE_WRONG, "wrong"
+
+            if row:
+                conn.execute(
+                    "UPDATE questions SET answer = ?, source = ?, wrong_answers = ?, updated_at = ?, "
+                    "course_title = CASE WHEN ? != '' THEN ? ELSE course_title END WHERE id = ?",
+                    (new_answer, new_source, wrong_json, now, ctitle, ctitle, row["id"]),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO questions (
+                        course_id, course_title, q_hash, q_type, title, options,
+                        answer, source, hit_count, created_at, updated_at, wrong_answers
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (cid, ctitle, q_hash, clean_type, clean_title, eff_options,
+                     new_answer, new_source, now, now, wrong_json),
+                )
+            conn.commit()
+            return action
+
     def list_courses(self) -> list[dict[str, Any]]:
         self._ensure_schema()
         with self._lock:
@@ -222,6 +365,8 @@ class QuestionBankDAO:
                     course_id,
                     MAX(course_title) AS course_title,
                     COUNT(*) AS question_count,
+                    SUM(CASE WHEN source IN ('verified', 'manual') THEN 1 ELSE 0 END) AS verified_count,
+                    SUM(CASE WHEN source = 'wrong' THEN 1 ELSE 0 END) AS wrong_count,
                     COALESCE(SUM(hit_count), 0) AS total_hits,
                     MAX(updated_at) AS updated_at
                 FROM questions
@@ -234,6 +379,8 @@ class QuestionBankDAO:
                     "course_id": r["course_id"],
                     "course_title": r["course_title"] or f"课程 {r['course_id']}",
                     "question_count": int(r["question_count"]),
+                    "verified_count": int(r["verified_count"] or 0),
+                    "wrong_count": int(r["wrong_count"] or 0),
                     "total_hits": int(r["total_hits"]),
                     "updated_at": int(r["updated_at"]),
                 }
@@ -244,6 +391,7 @@ class QuestionBankDAO:
         self,
         course_id: str | None = None,
         query: str = "",
+        source: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -253,6 +401,9 @@ class QuestionBankDAO:
         if course_id:
             clauses.append("course_id = ?")
             params.append(str(course_id).strip())
+        if source and str(source).strip():
+            clauses.append("source = ?")
+            params.append(str(source).strip())
         if query and query.strip():
             like = f"%{query.strip()}%"
             clauses.append("(title LIKE ? OR answer LIKE ?)")
@@ -270,7 +421,7 @@ class QuestionBankDAO:
             rows = conn.execute(
                 f"""
                 SELECT id, course_id, course_title, q_type, title, options, answer,
-                       source, hit_count, created_at, updated_at
+                       source, hit_count, created_at, updated_at, wrong_answers
                 FROM questions
                 {where}
                 ORDER BY updated_at DESC, id DESC
@@ -278,7 +429,11 @@ class QuestionBankDAO:
                 """,
                 [*params, limit, offset],
             ).fetchall()
-            items = [dict(r) for r in rows]
+            items = []
+            for r in rows:
+                item = dict(r)
+                item["wrong_answers"] = _load_wrong(item.get("wrong_answers"))
+                items.append(item)
         return {"items": items, "total": total}
 
     def update_answer(self, question_id: int, answer: str) -> bool:
@@ -289,9 +444,19 @@ class QuestionBankDAO:
         now = int(time.time())
         with self._lock:
             conn = self._get_conn()
+            row = conn.execute(
+                "SELECT id, q_type, wrong_answers FROM questions WHERE id = ? LIMIT 1",
+                (int(question_id),),
+            ).fetchone()
+            if not row:
+                return False
+            q_type = str(row["q_type"] or "")
+            norm_clean = normalize_answer(clean, q_type)
+            wrong_list = [w for w in _load_wrong(row["wrong_answers"]) if w != norm_clean]
+            wrong_json = json.dumps(wrong_list, ensure_ascii=False)
             cur = conn.execute(
-                "UPDATE questions SET answer = ?, source = 'manual', updated_at = ? WHERE id = ?",
-                (clean, now, int(question_id)),
+                "UPDATE questions SET answer = ?, source = 'manual', wrong_answers = ?, updated_at = ? WHERE id = ?",
+                (clean, wrong_json, now, int(question_id)),
             )
             conn.commit()
             return cur.rowcount > 0

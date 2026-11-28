@@ -17,7 +17,7 @@ from urllib3 import disable_warnings, exceptions
 
 from api.answer_check import check_answer
 from api.logger import logger
-from api.question_bank import QuestionBankDAO
+from api.question_bank import QuestionBankDAO, normalize_answer
 
 # 关闭警告
 disable_warnings(exceptions.InsecureRequestWarning)
@@ -198,7 +198,7 @@ class Tiku:
         options = q_info.get("options", "")
         qtype = q_info.get("type", "")
         use_cache = getattr(self, "USE_CACHE", True)
-        bank = self._get_bank() if use_cache else None
+        bank = self._get_bank()
 
         # 1. 优先查询按课程划分的自建本地 SQLite 题库
         if use_cache and bank is not None:
@@ -207,11 +207,24 @@ class Tiku:
                 logger.info(f"命中自建题库[课程 {cid}]：{q_info['title']} -> {answer}")
                 return answer.strip()
 
-        # 2. 自建题库未命中时调用 AI API 作答，校验通过后入库
-        answer = self._query(q_info)
+        # 2. 自建题库未命中时调用 AI API 作答，校验通过后入库（即使关闭缓存也读取已知错误列表避坑）
+        wrong_answers: list[str] = []
+        if bank is not None:
+            try:
+                wrong_answers = bank.get_wrong_answers(cid, q_info["title"], options, qtype)
+            except Exception as exc:
+                logger.debug(f"读取已知错误答案失败: {exc}")
+        q_for_ai = dict(q_info)
+        if wrong_answers:
+            q_for_ai["_wrong_answers"] = wrong_answers
+            logger.info(f"该题已知错误答案 {wrong_answers}，将提示 AI 避开")
+        answer = self._query(q_for_ai)
         if answer:
             answer = answer.strip()
             logger.info(f"从{self.name}获取答案：{q_info['title']} -> {answer}")
+            if wrong_answers and normalize_answer(answer, qtype) in wrong_answers:
+                logger.warning(f"AI 给出的答案 {answer} 已被批阅判定为错误，本次不采用")
+                return None
             if check_answer(answer, qtype, self):
                 if use_cache and bank is not None:
                     bank.save(cid, ctitle, q_info["title"], options, qtype, answer, source="AI")
@@ -476,6 +489,10 @@ class AI(Tiku):
             user_text = f"题目：{q_info['title']}"
 
         user_content = self._build_user_content(user_text)
+        _wrong = q_info.get("_wrong_answers") or []
+        if _wrong:
+            hint = "；".join(str(w) for w in _wrong)
+            system_prompt += f"\n注意：该题以下答案已被老师批改判定为错误，绝对不要再给出：{hint}。请重新思考后给出不同的答案。"
 
         self._wait_for_interval()
         self.last_request_time = time.time()

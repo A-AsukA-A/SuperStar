@@ -1858,6 +1858,7 @@ $("#btn-portal-save-restart").addEventListener("click", () => savePortalOptions(
 
 // ---------------- Question Bank (Course-Partitioned SQLite) ----------------
 let activeBankCourseId = "";
+const bankItemMap = new Map();
 
 async function loadBankCourses() {
   const { data } = await apiFetch("/api/bank/courses");
@@ -1874,9 +1875,13 @@ async function loadBankCourses() {
   const allChip = `<span class="session-chip ${activeBankCourseId === "" ? "active" : ""}" onclick="selectBankCourse('')">全部课程</span>`;
   const chips = courses.map((c) => {
     const active = activeBankCourseId === c.course_id ? "active" : "";
+    const extra = [
+      c.verified_count > 0 ? `验${c.verified_count}` : "",
+      c.wrong_count > 0 ? `错${c.wrong_count}` : "",
+    ].filter(Boolean).join(" · ");
     return `
       <span class="session-chip ${active}" onclick="selectBankCourse('${escapeHtml(c.course_id)}')">
-        <span>${escapeHtml(c.course_title)} (${c.question_count}题 · 命中${c.total_hits})</span>
+        <span>${escapeHtml(c.course_title)} (${c.question_count}题 · 命中${c.total_hits}${extra ? ` · ${extra}` : ""})</span>
         <button type="button" class="session-chip-del" title="清空该课程题库" onclick="event.stopPropagation(); clearBankCourse('${escapeHtml(c.course_id)}')">&times;</button>
       </span>
     `;
@@ -1887,10 +1892,14 @@ async function loadBankCourses() {
 async function loadBankQuestions() {
   const q = encodeURIComponent($("#bank-search").value.trim());
   const cid = activeBankCourseId ? `&course_id=${encodeURIComponent(activeBankCourseId)}` : "";
-  const { data } = await apiFetch(`/api/bank/questions?limit=100${cid}&q=${q}`);
+  const srcFilter = $("#bank-source-filter") ? $("#bank-source-filter").value.trim() : "";
+  const srcParam = srcFilter ? `&source=${encodeURIComponent(srcFilter)}` : "";
+  const { data } = await apiFetch(`/api/bank/questions?limit=100${cid}${srcParam}&q=${q}`);
   const items = data.items || [];
   const total = data.total ?? items.length;
   $("#bank-total-chip").textContent = `${total} 题`;
+  bankItemMap.clear();
+  items.forEach((it) => bankItemMap.set(it.id, it));
 
   const box = $("#bank-questions");
   if (!items.length) {
@@ -1905,24 +1914,35 @@ async function loadBankQuestions() {
     completion: "填空",
     shortanswer: "简答",
   };
+  const tierMeta = (item) => {
+    if (item.source === "verified") return { cls: "chip-ok", text: `已验证 · 命中 ${item.hit_count}` };
+    if (item.source === "manual") return { cls: "chip-info", text: `人工 · 命中 ${item.hit_count}` };
+    if (item.source === "wrong") return { cls: "chip-danger", text: "已知错误（已停用）" };
+    return { cls: "chip-neutral", text: `AI 未验证 · 命中 ${item.hit_count}` };
+  };
   box.innerHTML = items
     .map((item) => {
       const tLabel = typeMap[item.q_type] || item.q_type || "未知";
-      const srcLabel = item.source === "manual" ? "手动" : "AI";
+      const tier = tierMeta(item);
+      const wrongList = Array.isArray(item.wrong_answers) ? item.wrong_answers : [];
+      const wrongHtml = wrongList.length
+        ? `<div class="bank-wrong-row">已排除错误答案：${escapeHtml(wrongList.join(" / "))}</div>`
+        : "";
       return `
         <div class="bank-item">
           <div class="bank-item-head">
             <div class="bank-stem"><span class="chip chip-info">${escapeHtml(tLabel)}</span> ${escapeHtml(item.title)}</div>
             <div class="btn-group">
               <span class="chip chip-neutral">${escapeHtml(item.course_title || item.course_id)}</span>
-              <span class="chip chip-neutral">${srcLabel} · 命中 ${item.hit_count}</span>
+              <span class="chip ${tier.cls}">${tier.text}</span>
             </div>
           </div>
           ${item.options ? `<div class="bank-opts">${escapeHtml(item.options)}</div>` : ""}
+          ${wrongHtml}
           <div class="bank-ans-row">
-            <div>答案：<strong>${escapeHtml(item.answer)}</strong></div>
+            <div>${item.source === "wrong" ? "原错误答案" : "答案"}：<strong>${escapeHtml(item.answer)}</strong></div>
             <div class="btn-group">
-              <button class="btn btn-outlined btn-sm" onclick="editBankAnswer(${item.id}, '${escapeHtml(item.answer)}')">修改答案</button>
+              <button class="btn btn-outlined btn-sm" onclick="editBankAnswer(${item.id})">修改答案</button>
               <button class="btn btn-text btn-sm" onclick="deleteBankQuestion(${item.id})">删除</button>
             </div>
           </div>
@@ -1948,7 +1968,9 @@ window.clearBankCourse = async (cid) => {
   loadBankCourses().then(loadBankQuestions);
 };
 
-window.editBankAnswer = async (qid, currentAns) => {
+window.editBankAnswer = async (qid) => {
+  const item = bankItemMap.get(qid);
+  const currentAns = item ? String(item.answer || "") : "";
   const nextAns = prompt("输入新答案（单选/多选填字母如 A 或 AC，判断填 正确/错误）：", currentAns);
   if (nextAns === null) return;
   const clean = nextAns.trim();
@@ -1980,6 +2002,9 @@ window.deleteBankQuestion = async (qid) => {
 
 $("#btn-bank-refresh").addEventListener("click", () => loadBankCourses().then(loadBankQuestions));
 $("#bank-search").addEventListener("input", loadBankQuestions);
+if ($("#bank-source-filter")) {
+  $("#bank-source-filter").addEventListener("change", loadBankQuestions);
+}
 
 // ---------------- Init ----------------
 loadAiApis();

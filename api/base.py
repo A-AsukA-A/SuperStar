@@ -7,7 +7,7 @@ import time
 from difflib import SequenceMatcher
 from enum import Enum, IntEnum
 from hashlib import md5
-from typing import Self, Optional, Literal
+from typing import Any, Literal, Optional, Self
 
 import requests
 from loguru import logger
@@ -29,6 +29,7 @@ from api.decode import (
     decode_questions_info,
 )
 from api.exceptions import MaxRetryExceeded
+from api.work_review import apply_review, extract_redo_url, parse_review_html
 
 
 def get_timestamp():
@@ -139,8 +140,10 @@ class Chaoxing:
         self.tiku = tiku
         self.kwargs = kwargs
         self.rollback_times = 0
+        self.auto_redo_failed: bool = True
+        self.max_auto_redo: int = 2
         self.progress_reporter = None
-        self.last_work_notes: dict[str, dict[str, str]] = {}
+        self.last_work_notes: dict[str, dict[str, Any]] = {}
         self.rate_limiter = RateLimiter(0.5)  # 其他接口速率限制比较松
         self.video_log_limiter = RateLimiter(2)  # 上报进度极其容易卡验证码，限制2s一次
 
@@ -771,16 +774,56 @@ class Chaoxing:
         except Exception as e:
             logger.error(f"写入未通过测验记录失败: {e}")
 
-    def study_work(self, _course, _job, _job_info) -> StudyResult:
+    def _fetch_and_apply_work_review(
+        self,
+        session: requests.Session,
+        work_url: str,
+        work_params: dict[str, Any],
+        course: dict,
+        question_list: list[dict],
+    ) -> tuple[dict[str, int], Optional[str]]:
+        """提交测验后拉取批阅结果页，自动验证/纠错本地题库并检测是否允许重做。"""
+        default_stats = {"verified": 0, "corrected": 0, "wrong": 0, "unknown": 0}
+        try:
+            time.sleep(1.0)
+            resp = session.get(work_url, params=work_params, timeout=15)
+            if resp.status_code != 200:
+                return default_stats, None
+            redo_url = extract_redo_url(resp.text)
+            review = parse_review_html(resp.text)
+            bank = self.tiku._get_bank() if hasattr(self.tiku, "_get_bank") else None
+            if bank is None:
+                return default_stats, redo_url
+            stats = apply_review(
+                bank,
+                str(course.get("courseId") or ""),
+                str(course.get("title") or ""),
+                question_list,
+                review,
+            )
+            return stats, redo_url
+        except Exception as exc:
+            logger.warning(f"提交后拉取批阅结果失败: {exc}")
+            return default_stats, None
+
+    def study_work(
+        self,
+        _course,
+        _job,
+        _job_info,
+        _redo_url: str = "",
+        _redo_round: int = 0,
+    ) -> StudyResult:
         # FIXME: 这一块可以单独搞一个类出来了，方法里面又套方法，每一次调用都会创建新的方法，十分浪费
         if self.tiku.DISABLE or not self.tiku:
             return StudyResult.SUCCESS
         _ORIGIN_HTML_CONTENT = ""  # 用于配合输出网页源码, 帮助修复#391错误
 
-        def random_answer(options: str) -> str:
+        def random_answer(options: str, wrong_answers: list[str] | None = None) -> str:
             answer = ""
             if not options:
                 return answer
+            wrong_set = set(wrong_answers or [])
 
             if q["type"] == "multiple":
                 logger.debug(f"当前选项列表[cut前] -> {options}")
@@ -821,18 +864,27 @@ class Chaoxing:
 
                     select_count = random.choices(possible_counts, weights=weights, k=1)[0]
 
-                selected_options = random.sample(_op_list, select_count) if select_count > 0 else []
-
-                for option in selected_options:
-                    answer += option[:1]  # 取首字为答案，例如A或B
-
-                answer = "".join(sorted(answer))
+                for _attempt in range(8):
+                    selected_options = random.sample(_op_list, select_count) if select_count > 0 else []
+                    cand = "".join(sorted(option[:1] for option in selected_options))
+                    if cand not in wrong_set:
+                        answer = cand
+                        break
+                if not answer:
+                    selected_options = random.sample(_op_list, select_count) if select_count > 0 else []
+                    answer = "".join(sorted(option[:1] for option in selected_options))
             elif q["type"] == "single":
-                answer = random.choice(options.split("\n"))[:1]  # 取首字为答案, 例如A或B
+                opts = [line for line in options.split("\n") if line.strip()]
+                cand = [o for o in opts if o[:1].upper() not in wrong_set]
+                answer = random.choice(cand or opts)[:1]  # 取首字为答案, 例如A或B
             # 判断题处理
             elif q["type"] == "judgement":
-                # answer = self.tiku.jugement_select(_answer)
-                answer = "true" if random.choice([True, False]) else "false"
+                choices: list[str] = []
+                if "正确" not in wrong_set:
+                    choices.append("true")
+                if "错误" not in wrong_set:
+                    choices.append("false")
+                answer = random.choice(choices or ["true", "false"])
             logger.info(f"随机选择 -> {answer}")
             return answer
 
@@ -983,42 +1035,36 @@ class Chaoxing:
         _retry_delay = 0 if getattr(self, "force_redo", False) else 1
 
         _jobid_str = str(_job.get("jobid") or "")
+        _work_params = {
+            "api": "1",
+            "workId": _job["jobid"].replace("work-", ""),
+            "jobid": _job["jobid"],
+            "originJobId": _job["jobid"],
+            "needRedirect": "true",
+            "skipHeader": "true",
+            "knowledgeid": str(_job_info["knowledgeid"]),
+            "ktoken": _job_info["ktoken"],
+            "cpi": _job_info["cpi"],
+            "ut": "s",
+            "clazzId": _course["clazzId"],
+            "type": "",
+            "enc": _job["enc"],
+            "mooc2": "1",
+            "courseid": _course["courseId"],
+        }
 
         @with_retry(max_retries=_retry_times, delay=_retry_delay)
         def fetch_response():
-            _r = _session.get(
-                _url,
-                params={
-                    "api": "1",
-                    "workId": _job["jobid"].replace("work-", ""),
-                    "jobid": _job["jobid"],
-                    "originJobId": _job["jobid"],
-                    "needRedirect": "true",
-                    "skipHeader": "true",
-                    "knowledgeid": str(_job_info["knowledgeid"]),
-                    "ktoken": _job_info["ktoken"],
-                    "cpi": _job_info["cpi"],
-                    "ut": "s",
-                    "clazzId": _course["clazzId"],
-                    "type": "",
-                    "enc": _job["enc"],
-                    "mooc2": "1",
-                    "courseid": _course["courseId"],
-                }
-            )
+            if _redo_url:
+                return _session.get(_redo_url)
+            _r = _session.get(_url, params=_work_params)
             if getattr(self, "force_redo", False) and _r.status_code == 200:
                 _q_check = decode_questions_info(_r.text)
                 if not _q_check.get("questions"):
-                    import html as _html
-                    _redo_m = re.search(
-                        r"""['"]((?:https?:)?//mooc1\.chaoxing\.com)?(/mooc-ans/work/doHomeWorkNew\?[^'"]*(?:isredo|redo)[^'"]*)['"]""",
-                        _r.text,
-                        re.I,
-                    )
-                    if _redo_m:
-                        _redo_url = "https://mooc1.chaoxing.com" + _html.unescape(_redo_m.group(2))
-                        logger.info(f"检测到重做测验入口，正在进入作答页面...")
-                        _r = _session.get(_redo_url)
+                    _found_redo = extract_redo_url(_r.text)
+                    if _found_redo:
+                        logger.info("检测到重做测验入口，正在进入作答页面...")
+                        _r = _session.get(_found_redo)
             return _r
 
         final_resp = {}
@@ -1043,7 +1089,21 @@ class Chaoxing:
             return StudyResult.ERROR
 
         _ORIGIN_HTML_CONTENT = final_resp.text  # 用于配合输出网页源码, 帮助修复#391错误
-        _question_list = questions.get("questions", [])
+        def _known_wrong_for(question: dict) -> list[str]:
+            if hasattr(self.tiku, "_get_bank"):
+                try:
+                    return self.tiku._get_bank().get_wrong_answers(
+                        str(_course.get("courseId") or ""),
+                        question.get("title", ""),
+                        question.get("options", ""),
+                        question.get("type", ""),
+                    )
+                except Exception:
+                    return []
+            return []
+
+        _question_list = list(questions.get("questions", []))
+        _pending_redo_url: Optional[str] = None
         _work_title = ""
         try:
             import html as _html
@@ -1084,8 +1144,8 @@ class Chaoxing:
                 )
                 answer = ""
                 if not res:
-                    # 随机答题
-                    answer = random_answer(q["options"])
+                    # 随机答题（避开已被批阅判错的选项）
+                    answer = random_answer(q["options"], _known_wrong_for(q))
                     q[f'answerSource{q["id"]}'] = "random"
                 else:
                     # 根据响应结果选择答案
@@ -1138,7 +1198,7 @@ class Chaoxing:
 
                     if not answer:  # 检查 answer 是否为空
                         logger.warning(f"找到答案但答案未能匹配 -> {res}\t随机选择答案")
-                        answer = random_answer(q["options"])  # 如果为空，则随机选择答案
+                        answer = random_answer(q["options"], _known_wrong_for(q))  # 如果为空，则随机选择答案
                         q[f'answerSource{q["id"]}'] = "random"
                     else:
                         logger.info(f"成功获取到答案：{answer}")
@@ -1216,27 +1276,67 @@ class Chaoxing:
                 if res_json["status"]:
                     act_word = "提交" if questions["pyFlag"] == "" else "保存"
                     logger.info(f'{act_word}答题成功 -> {res_json["msg"]}')
-                    if questions["pyFlag"] == "" and res_json.get("stuStatus") == 5:
-                        self.last_work_notes[_jobid_str] = {
-                            "code": "failed_grade",
-                            "message": "提交成功，但未达到及格线（stuStatus=5）",
-                        }
-                        logger.warning("本次提交未达到及格线（stuStatus=5），任务点不会恢复，需要重做该测验")
-                        self._record_failed_work(
-                            str(_course.get("title", "")),
-                            _work_title or str(_job.get("jobid", "")),
-                            f'{_course.get("courseId")}-{_job.get("jobid")}',
-                            _question_list,
+                    if questions["pyFlag"] == "":
+                        review_stats, redo_url = self._fetch_and_apply_work_review(
+                            _session, _url, _work_params, _course, _question_list
                         )
-                    elif questions["pyFlag"] == "1":
+                        if (
+                            review_stats.get("verified", 0)
+                            + review_stats.get("corrected", 0)
+                            + review_stats.get("wrong", 0)
+                        ) > 0:
+                            logger.info(
+                                f"提交后批阅自动校对题库 -> 已验证 {review_stats['verified']} 题，"
+                                f"自动纠错 {review_stats['corrected']} 题，标记错题 {review_stats['wrong']} 题"
+                            )
+                        learned = (review_stats.get("corrected", 0) + review_stats.get("wrong", 0)) > 0
+                        if res_json.get("stuStatus") == 5:
+                            self.last_work_notes[_jobid_str] = {
+                                "code": "failed_grade",
+                                "message": "提交成功，但未达到及格线（stuStatus=5）",
+                                "review": review_stats,
+                                "can_redo": bool(redo_url),
+                                "redo_url": redo_url or "",
+                            }
+                            if (
+                                self.auto_redo_failed
+                                and _redo_round < self.max_auto_redo
+                                and redo_url
+                                and learned
+                            ):
+                                logger.warning(
+                                    f"未达到及格线（stuStatus=5），已根据批阅结果纠错题库，"
+                                    f"准备自动重做 ({_redo_round + 1}/{self.max_auto_redo})..."
+                                )
+                                _pending_redo_url = redo_url
+                            else:
+                                if not redo_url:
+                                    reason = "平台未开放重做入口"
+                                elif not learned:
+                                    reason = "批阅页未返回可纠错信息"
+                                elif not self.auto_redo_failed:
+                                    reason = "由外部补救队列统一调度重做"
+                                else:
+                                    reason = f"已达最大自动重做次数（{self.max_auto_redo} 次）"
+                                logger.warning(f"本次提交未达到及格线（stuStatus=5，{reason}）")
+                                self._record_failed_work(
+                                    str(_course.get("title", "")),
+                                    _work_title or str(_job.get("jobid", "")),
+                                    f'{_course.get("courseId")}-{_job.get("jobid")}',
+                                    _question_list,
+                                )
+                        else:
+                            self.last_work_notes[_jobid_str] = {
+                                "code": "submitted",
+                                "message": f"提交答题成功（{res_json.get('msg', 'success')}）",
+                                "review": review_stats,
+                                "can_redo": bool(redo_url),
+                                "redo_url": redo_url or "",
+                            }
+                    else:
                         self.last_work_notes[_jobid_str] = {
                             "code": "saved",
                             "message": f"已暂存答题草稿（{res_json.get('msg', '')}）",
-                        }
-                    else:
-                        self.last_work_notes[_jobid_str] = {
-                            "code": "submitted",
-                            "message": f"提交答题成功（{res_json.get('msg', 'success')}）",
                         }
                 else:
                     self.last_work_notes[_jobid_str] = {
@@ -1252,10 +1352,22 @@ class Chaoxing:
                 }
                 logger.error(f'{"提交" if questions["pyFlag"] == "" else "保存"}答题失败 -> {res.text}')
                 return StudyResult.ERROR
-            return StudyResult.SUCCESS
+            if not _pending_redo_url:
+                return StudyResult.SUCCESS
         finally:
             if self.progress_reporter:
                 self.progress_reporter.finish_job(job_key)
+
+        if _pending_redo_url:
+            time.sleep(2.0)
+            return self.study_work(
+                _course,
+                _job,
+                _job_info,
+                _redo_url=_pending_redo_url,
+                _redo_round=_redo_round + 1,
+            )
+        return StudyResult.SUCCESS
 
     def study_read(self, _course, _job, _job_info) -> StudyResult:
         """

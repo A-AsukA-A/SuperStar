@@ -64,6 +64,13 @@
       <div class="toolbar">
         <div class="btn-group" style="flex: 1; min-width: 240px;">
           <input type="text" id="bank-search" class="toolbar-input" placeholder="搜索题干或答案..." />
+          <select id="bank-source-filter" class="toolbar-select" title="按验证状态筛选">
+            <option value="">全部状态</option>
+            <option value="verified">已验证</option>
+            <option value="manual">人工确认</option>
+            <option value="AI">AI 未验证</option>
+            <option value="wrong">已知错误</option>
+          </select>
           <span id="bank-total-chip" class="chip chip-neutral">0 题</span>
         </div>
         <button id="btn-bank-refresh" class="btn btn-outlined">刷新题库</button>

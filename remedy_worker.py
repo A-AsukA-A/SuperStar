@@ -204,6 +204,7 @@ def run_remedy_queue(
 
     chaoxing = Chaoxing(account=Account("", ""), tiku=tiku, query_delay=query_delay)
     chaoxing.force_redo = True
+    chaoxing.auto_redo_failed = False  # 由补救队列调度自动重做项，便于在队列面板中展示进度
     chaoxing.progress_reporter = bridge
 
     items: list[dict[str, Any]] = queue_data.get("items") or []
@@ -212,10 +213,13 @@ def run_remedy_queue(
     queue_data["updated_at"] = int(time.time())
     _atomic_write_json(queue_file, queue_data)
 
-    for idx, item in enumerate(items):
+    idx = 0
+    while idx < len(items):
+        item = items[idx]
         if stop_event.is_set():
             break
         if item.get("status") in ("done", "skipped"):
+            idx += 1
             continue
 
         item["status"] = "running"
@@ -262,11 +266,43 @@ def run_remedy_queue(
                         note = chaoxing.last_work_notes.get(w_job["jobid"]) or {}
                         code = note.get("code", "")
                         msg = note.get("message") or ("处理完成" if res == StudyResult.SUCCESS else "答题失败")
+                        rev = note.get("review") or {}
+                        if (rev.get("corrected", 0) + rev.get("wrong", 0)) > 0:
+                            msg = f"{msg}（已纠错 {rev.get('corrected', 0)} / 标错 {rev.get('wrong', 0)}）"
                         messages.append(f"{w_job['name']}：{msg}")
                         if res != StudyResult.SUCCESS or code in ("error",):
                             had_error = True
                         elif code in ("submitted", "saved", "failed_grade"):
                             had_done = True
+                        if (
+                            code == "failed_grade"
+                            and note.get("can_redo")
+                            and (rev.get("corrected", 0) + rev.get("wrong", 0)) > 0
+                            and not stop_event.is_set()
+                        ):
+                            retry_round = int(item.get("auto_retry_round") or 0)
+                            if retry_round < 2:
+                                items.append(
+                                    {
+                                        "course_id": cid,
+                                        "course_title": str(item.get("course_title") or ""),
+                                        "clazz_id": clazz_id,
+                                        "cpi": cpi,
+                                        "knowledge_id": kid,
+                                        "chapter_title": str(item.get("chapter_title") or ""),
+                                        "jobid": w_job["jobid"],
+                                        "work_name": f"{w_job['name']}（自动纠错重做 {retry_round + 1}/2）",
+                                        "auto_remedy": True,
+                                        "auto_retry_round": retry_round + 1,
+                                        "status": "pending",
+                                        "message": "已自动纠错，等待排队重做",
+                                        "started_at": None,
+                                        "finished_at": None,
+                                    }
+                                )
+                                with write_lock:
+                                    queue_data["total"] = len(items)
+                                messages.append("已加入自动纠错重做队列")
 
                     if stop_event.is_set():
                         item["status"] = "stopped"
@@ -288,11 +324,13 @@ def run_remedy_queue(
             item["finished_at"] = int(time.time())
             with write_lock:
                 bridge.current_item = None
+                queue_data["total"] = len(items)
                 queue_data["done_count"] = sum(1 for x in items if x.get("status") == "done")
                 queue_data["skipped_count"] = sum(1 for x in items if x.get("status") == "skipped")
                 queue_data["failed_count"] = sum(1 for x in items if x.get("status") == "failed")
                 queue_data["updated_at"] = int(time.time())
                 _atomic_write_json(queue_file, queue_data)
+            idx += 1
 
     if stop_event.is_set():
         for item in items:
